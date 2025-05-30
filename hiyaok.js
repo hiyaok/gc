@@ -1,3 +1,4 @@
+//
 const { Telegraf, Markup } = require('telegraf');
 const { makeWASocket, DisconnectReason, useMultiFileAuthState, getAggregateVotesInPollMessage } = require('@whiskeysockets/baileys');
 const QRCode = require('qrcode');
@@ -13,7 +14,7 @@ const bot = new Telegraf(BOT_TOKEN);
 global.crypto = crypto;
 
 // Admin Bot (ganti dengan ID Telegram admin)
-const ADMIN_IDS = [5988451717]; // Isi dengan user ID admin
+const ADMIN_IDS = [6903821235]; // Isi dengan user ID admin
 
 // Menyimpan koneksi WhatsApp per user
 const waConnections = new Map();
@@ -286,10 +287,9 @@ bot.command('help', async (ctx) => {
 ⚙️ *Fitur Grup yang Bisa Dikelola:*
 • Edit Info Grup (ON/OFF)
 • Kirim Pesan (ON/OFF)  
-• Tambah Anggota (ALL/ADMIN)
+• Tambah Anggota (ON/OFF)
 • Pesan Sementara (ON/OFF)
 • Setujui Anggota (ON/OFF)
-• Upload Foto Grup
 
 💡 *Tips:*
 - Pastikan Anda adalah admin di grup WhatsApp
@@ -330,11 +330,11 @@ bot.on('text', async (ctx) => {
         const groupFullInfo = await getGroupFullInfo(sock, groupId);
         const groupMetadata = groupFullInfo.metadata;
         
-        // Get current settings
+        // Get current settings dengan logic yang benar
         const settings = {
-            editInfo: groupMetadata.restrict ? '🔒 ADMIN' : '✅ ALL',
-            sendMessage: groupMetadata.announce ? '🔒 ADMIN' : '✅ ALL',
-            addMember: groupMetadata.memberAddMode ? '🔒 ADMIN' : '✅ ALL',
+            editInfo: groupMetadata.restrict ? '❌ OFF' : '✅ ON',
+            sendMessage: groupMetadata.announce ? '❌ OFF' : '✅ ON',
+            addMember: groupMetadata.memberAddMode === false ? '✅ ON' : '❌ OFF',
             ephemeral: groupFullInfo.ephemeral > 0 ? '✅ ON' : '❌ OFF',
             approveMembers: groupMetadata.joinApprovalMode ? '✅ ON' : '❌ OFF'
         };
@@ -351,12 +351,11 @@ ${groupMetadata.desc ? `📝 *Deskripsi:* ${groupMetadata.desc}\n` : ''}
         `;
         
         const keyboard = [
-            [Markup.button.callback(`📝 Edit Info: ${settings.editInfo}`, `toggle_edit_${groupId}`)],
+            [Markup.button.callback(`📝 Edit Info Grup: ${settings.editInfo}`, `toggle_edit_${groupId}`)],
             [Markup.button.callback(`💬 Kirim Pesan: ${settings.sendMessage}`, `toggle_send_${groupId}`)],
             [Markup.button.callback(`➕ Tambah Anggota: ${settings.addMember}`, `toggle_add_${groupId}`)],
             [Markup.button.callback(`⏰ Pesan Sementara: ${settings.ephemeral}`, `toggle_ephemeral_${groupId}`)],
             [Markup.button.callback(`✅ Setujui Anggota: ${settings.approveMembers}`, `toggle_approve_${groupId}`)],
-            [Markup.button.callback('🖼 Upload Foto Grup', `upload_photo_${groupId}`)],
             [Markup.button.callback('🔄 Refresh', `refresh_${groupId}`)],
             [Markup.button.callback('❌ Tutup', 'close_menu')]
         ];
@@ -369,43 +368,6 @@ ${groupMetadata.desc ? `📝 *Deskripsi:* ${groupMetadata.desc}\n` : ''}
     } catch (error) {
         console.error('Error processing group link:', error);
         await ctx.reply('❌ *Gagal memproses link grup*\n\nPastikan link valid dan bot memiliki akses', { parse_mode: 'Markdown' });
-    }
-});
-
-// Handle photo untuk upload foto grup
-bot.on('photo', async (ctx) => {
-    if (!isAdmin(ctx)) return;
-    
-    const userId = ctx.from.id;
-    const state = userStates.get(userId);
-    
-    if (!state?.waitingForPhoto) return;
-    
-    const sock = waConnections.get(userId);
-    if (!sock) return;
-    
-    try {
-        await ctx.reply('🔄 *Mengupload foto grup...*', { parse_mode: 'Markdown' });
-        
-        // Download foto
-        const fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
-        const fileUrl = await ctx.telegram.getFileLink(fileId);
-        
-        // Download file
-        const response = await fetch(fileUrl.href);
-        const buffer = await response.buffer();
-        
-        // Update profile picture grup
-        await sock.updateProfilePicture(state.groupId, buffer);
-        
-        await ctx.reply('✅ *Foto grup berhasil diupdate!*', { parse_mode: 'Markdown' });
-        
-        // Reset state
-        userStates.set(userId, { ...state, waitingForPhoto: false, groupId: null });
-        
-    } catch (error) {
-        console.error('Error uploading group photo:', error);
-        await ctx.reply('❌ *Gagal mengupload foto grup*\n\nPastikan Anda admin di grup tersebut', { parse_mode: 'Markdown' });
     }
 });
 
@@ -477,13 +439,14 @@ bot.action(/toggle_edit_(.+)/, async (ctx) => {
     try {
         await ctx.answerCbQuery('🔄 Mengubah pengaturan...');
         
-        // Toggle restrict setting
+        // Toggle restrict setting (Edit Info Grup)
         const groupMetadata = await sock.groupMetadata(groupId);
         await sock.groupSettingUpdate(groupId, groupMetadata.restrict ? 'unlocked' : 'locked');
         
         // Update message
         await updateGroupMessage(ctx, sock, groupId);
     } catch (error) {
+        console.error('Error toggle edit:', error);
         await ctx.answerCbQuery('❌ Gagal mengubah pengaturan');
     }
 });
@@ -498,13 +461,14 @@ bot.action(/toggle_send_(.+)/, async (ctx) => {
     try {
         await ctx.answerCbQuery('🔄 Mengubah pengaturan...');
         
-        // Toggle announce setting
+        // Toggle announce setting (Kirim Pesan)
         const groupMetadata = await sock.groupMetadata(groupId);
         await sock.groupSettingUpdate(groupId, groupMetadata.announce ? 'not_announcement' : 'announcement');
         
         // Update message
         await updateGroupMessage(ctx, sock, groupId);
     } catch (error) {
+        console.error('Error toggle send:', error);
         await ctx.answerCbQuery('❌ Gagal mengubah pengaturan');
     }
 });
@@ -519,13 +483,17 @@ bot.action(/toggle_add_(.+)/, async (ctx) => {
     try {
         await ctx.answerCbQuery('🔄 Mengubah pengaturan...');
         
-        // Toggle member add mode
+        // Toggle member add setting
         const groupMetadata = await sock.groupMetadata(groupId);
-        await sock.groupMemberAddMode(groupId, groupMetadata.memberAddMode ? 'all_member_can_add' : 'admin_only');
+        const currentSetting = groupMetadata.memberAddMode === false;
+        
+        // Gunakan groupSettingUpdate dengan 'member_add_mode'
+        await sock.groupSettingUpdate(groupId, currentSetting ? 'member_add_admin_only' : 'member_add_all');
         
         // Update message
         await updateGroupMessage(ctx, sock, groupId);
     } catch (error) {
+        console.error('Error toggle add member:', error);
         await ctx.answerCbQuery('❌ Gagal mengubah pengaturan');
     }
 });
@@ -549,6 +517,7 @@ bot.action(/toggle_ephemeral_(.+)/, async (ctx) => {
         // Update message
         await updateGroupMessage(ctx, sock, groupId);
     } catch (error) {
+        console.error('Error toggle ephemeral:', error);
         await ctx.answerCbQuery('❌ Gagal mengubah pengaturan');
     }
 });
@@ -563,29 +532,19 @@ bot.action(/toggle_approve_(.+)/, async (ctx) => {
     try {
         await ctx.answerCbQuery('🔄 Mengubah pengaturan...');
         
-        // Toggle join approval mode
+        // Toggle join approval mode  
         const groupMetadata = await sock.groupMetadata(groupId);
-        await sock.groupJoinApprovalMode(groupId, groupMetadata.joinApprovalMode ? 'off' : 'on');
+        const mode = groupMetadata.joinApprovalMode ? 'off' : 'on';
+        
+        // Gunakan groupSettingUpdate untuk join approval
+        await sock.groupSettingUpdate(groupId, mode === 'on' ? 'approval_mode_on' : 'approval_mode_off');
         
         // Update message
         await updateGroupMessage(ctx, sock, groupId);
     } catch (error) {
+        console.error('Error toggle approve:', error);
         await ctx.answerCbQuery('❌ Gagal mengubah pengaturan');
     }
-});
-
-bot.action(/upload_photo_(.+)/, async (ctx) => {
-    const groupId = ctx.match[1];
-    const userId = ctx.from.id;
-    const sock = waConnections.get(userId);
-    
-    if (!sock) return ctx.answerCbQuery('WhatsApp tidak terhubung!');
-    
-    await ctx.answerCbQuery();
-    await ctx.reply('📸 *Kirim foto untuk grup*\n\nSilakan kirim foto yang ingin dijadikan foto profil grup', { parse_mode: 'Markdown' });
-    
-    // Set state waiting for photo
-    userStates.set(userId, { waitingForPhoto: true, groupId });
 });
 
 bot.action(/refresh_(.+)/, async (ctx) => {
@@ -609,10 +568,11 @@ async function updateGroupMessage(ctx, sock, groupId) {
         const groupFullInfo = await getGroupFullInfo(sock, groupId);
         const groupMetadata = groupFullInfo.metadata;
         
+        // Get current settings dengan logic yang benar
         const settings = {
-            editInfo: groupMetadata.restrict ? '🔒 ADMIN' : '✅ ALL',
-            sendMessage: groupMetadata.announce ? '🔒 ADMIN' : '✅ ALL',
-            addMember: groupMetadata.memberAddMode ? '🔒 ADMIN' : '✅ ALL',
+            editInfo: groupMetadata.restrict ? '❌ OFF' : '✅ ON',
+            sendMessage: groupMetadata.announce ? '❌ OFF' : '✅ ON',
+            addMember: groupMetadata.memberAddMode === false ? '✅ ON' : '❌ OFF',
             ephemeral: groupFullInfo.ephemeral > 0 ? '✅ ON' : '❌ OFF',
             approveMembers: groupMetadata.joinApprovalMode ? '✅ ON' : '❌ OFF'
         };
@@ -630,12 +590,11 @@ ${groupMetadata.desc ? `📝 *Deskripsi:* ${groupMetadata.desc}\n` : ''}
         `;
         
         const keyboard = [
-            [Markup.button.callback(`📝 Edit Info: ${settings.editInfo}`, `toggle_edit_${groupId}`)],
+            [Markup.button.callback(`📝 Edit Info Grup: ${settings.editInfo}`, `toggle_edit_${groupId}`)],
             [Markup.button.callback(`💬 Kirim Pesan: ${settings.sendMessage}`, `toggle_send_${groupId}`)],
             [Markup.button.callback(`➕ Tambah Anggota: ${settings.addMember}`, `toggle_add_${groupId}`)],
             [Markup.button.callback(`⏰ Pesan Sementara: ${settings.ephemeral}`, `toggle_ephemeral_${groupId}`)],
             [Markup.button.callback(`✅ Setujui Anggota: ${settings.approveMembers}`, `toggle_approve_${groupId}`)],
-            [Markup.button.callback('🖼 Upload Foto Grup', `upload_photo_${groupId}`)],
             [Markup.button.callback('🔄 Refresh', `refresh_${groupId}`)],
             [Markup.button.callback('❌ Tutup', 'close_menu')]
         ];
