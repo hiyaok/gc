@@ -3,21 +3,22 @@ const { makeWASocket, DisconnectReason, useMultiFileAuthState, getAggregateVotes
 const QRCode = require('qrcode');
 const fs = require('fs').promises;
 const path = require('path');
-const crypto = require('crypto'); // Import untuk modul crypto
+const crypto = require('crypto');
 
 // Token Bot Telegram
 const BOT_TOKEN = '7781035249:AAHdINZifB8f7TOAJ7hy3h7lQ8MXKd48dKo';
 const bot = new Telegraf(BOT_TOKEN);
 
-//
+// Crypto global
 global.crypto = crypto;
 
 // Admin Bot (ganti dengan ID Telegram admin)
-const ADMIN_IDS = [5988451717]; // Isi dengan user ID admin, contoh: [123456789]
+const ADMIN_IDS = [5988451717]; // Isi dengan user ID admin
 
 // Menyimpan koneksi WhatsApp per user
 const waConnections = new Map();
 const userStates = new Map();
+const connectionStates = new Map();
 
 // Middleware untuk cek admin
 const isAdmin = (ctx) => {
@@ -28,6 +29,9 @@ const isAdmin = (ctx) => {
 // Fungsi untuk membuat koneksi WhatsApp
 async function createWhatsAppConnection(userId, ctx) {
     try {
+        // Set status koneksi aktif
+        connectionStates.set(userId, { cancelled: false, connecting: true });
+        
         const authFolder = path.join(__dirname, 'auth', userId.toString());
         await fs.mkdir(authFolder, { recursive: true });
         
@@ -43,7 +47,20 @@ async function createWhatsAppConnection(userId, ctx) {
         sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect, qr } = update;
             
+            // Cek apakah koneksi sudah dibatalkan
+            const connState = connectionStates.get(userId);
+            if (connState?.cancelled) {
+                sock.end();
+                return;
+            }
+            
             if (qr) {
+                // Cek lagi sebelum kirim QR
+                if (connState?.cancelled) {
+                    sock.end();
+                    return;
+                }
+                
                 // Generate QR code
                 try {
                     const qrImage = await QRCode.toBuffer(qr);
@@ -64,7 +81,10 @@ async function createWhatsAppConnection(userId, ctx) {
                     // Auto delete QR after 60 seconds
                     setTimeout(async () => {
                         try {
-                            await ctx.deleteMessage(qrMessage.message_id);
+                            const state = userStates.get(userId);
+                            if (state?.qrMessageId === qrMessage.message_id) {
+                                await ctx.deleteMessage(qrMessage.message_id);
+                            }
                         } catch (e) {}
                     }, 60000);
                 } catch (error) {
@@ -76,13 +96,24 @@ async function createWhatsAppConnection(userId, ctx) {
                 const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
                 console.log('connection closed due to ', lastDisconnect?.error, ', reconnecting ', shouldReconnect);
                 
+                // Cek apakah koneksi dibatalkan
+                if (connState?.cancelled) {
+                    waConnections.delete(userId);
+                    connectionStates.delete(userId);
+                    return;
+                }
+                
                 if (shouldReconnect) {
                     createWhatsAppConnection(userId, ctx);
                 } else {
                     waConnections.delete(userId);
+                    connectionStates.delete(userId);
                     await ctx.reply('❌ *Koneksi WhatsApp terputus*\n\nSilakan gunakan /connect untuk menghubungkan kembali', { parse_mode: 'Markdown' });
                 }
             } else if (connection === 'open') {
+                // Hapus flag connecting
+                connectionStates.delete(userId);
+                
                 const state = userStates.get(userId);
                 if (state?.qrMessageId) {
                     try {
@@ -99,6 +130,30 @@ async function createWhatsAppConnection(userId, ctx) {
         return sock;
     } catch (error) {
         console.error('Error creating WhatsApp connection:', error);
+        connectionStates.delete(userId);
+        throw error;
+    }
+}
+
+// Helper function untuk mendapatkan info grup lengkap
+async function getGroupFullInfo(sock, groupId) {
+    try {
+        const metadata = await sock.groupMetadata(groupId);
+        const groupInfo = await sock.groupInviteCode(groupId).catch(() => null);
+        
+        // Get ephemeral setting
+        let ephemeralSetting = 0;
+        if (metadata.ephemeralDuration) {
+            ephemeralSetting = metadata.ephemeralDuration;
+        }
+        
+        return {
+            metadata,
+            inviteCode: groupInfo,
+            ephemeral: ephemeralSetting
+        };
+    } catch (error) {
+        console.error('Error getting group info:', error);
         throw error;
     }
 }
@@ -136,6 +191,12 @@ bot.command('connect', async (ctx) => {
     
     if (waConnections.has(userId)) {
         return ctx.reply('⚠️ *WhatsApp sudah terhubung!*\n\nGunakan /logout untuk menghapus sesi saat ini', { parse_mode: 'Markdown' });
+    }
+    
+    // Cek apakah sedang dalam proses koneksi
+    const connState = connectionStates.get(userId);
+    if (connState?.connecting) {
+        return ctx.reply('⚠️ *Proses koneksi sedang berjalan!*\n\nSilakan tunggu atau klik tombol Cancel pada QR Code', { parse_mode: 'Markdown' });
     }
     
     await ctx.reply('🔄 *Memulai proses koneksi WhatsApp...*', { parse_mode: 'Markdown' });
@@ -228,6 +289,7 @@ bot.command('help', async (ctx) => {
 • Tambah Anggota (ALL/ADMIN)
 • Pesan Sementara (ON/OFF)
 • Setujui Anggota (ON/OFF)
+• Upload Foto Grup
 
 💡 *Tips:*
 - Pastikan Anda adalah admin di grup WhatsApp
@@ -264,16 +326,17 @@ bot.on('text', async (ctx) => {
         // Join group if not already joined
         const groupId = await sock.groupAcceptInvite(inviteCode);
         
-        // Get group metadata
-        const groupMetadata = await sock.groupMetadata(groupId);
+        // Get group metadata dan info lengkap
+        const groupFullInfo = await getGroupFullInfo(sock, groupId);
+        const groupMetadata = groupFullInfo.metadata;
         
         // Get current settings
         const settings = {
-            editInfo: groupMetadata.restrict ? 'ON' : 'OFF',
-            sendMessage: groupMetadata.announce ? 'ON' : 'OFF',
-            addMember: 'ALL', // Default, perlu logic tambahan
-            ephemeral: 'OFF', // Default, perlu logic tambahan
-            approveMembers: 'OFF' // Default, perlu logic tambahan
+            editInfo: groupMetadata.restrict ? '🔒 ADMIN' : '✅ ALL',
+            sendMessage: groupMetadata.announce ? '🔒 ADMIN' : '✅ ALL',
+            addMember: groupMetadata.memberAddMode ? '🔒 ADMIN' : '✅ ALL',
+            ephemeral: groupFullInfo.ephemeral > 0 ? '✅ ON' : '❌ OFF',
+            approveMembers: groupMetadata.joinApprovalMode ? '✅ ON' : '❌ OFF'
         };
         
         const message = `
@@ -282,6 +345,7 @@ _${groupMetadata.subject}_
 
 👥 *Anggota:* ${groupMetadata.participants.length} orang
 📅 *Dibuat:* ${new Date(groupMetadata.creation * 1000).toLocaleDateString('id-ID')}
+${groupMetadata.desc ? `📝 *Deskripsi:* ${groupMetadata.desc}\n` : ''}
 
 ⚙️ *Pengaturan Grup Saat Ini:*
         `;
@@ -308,16 +372,65 @@ _${groupMetadata.subject}_
     }
 });
 
+// Handle photo untuk upload foto grup
+bot.on('photo', async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    
+    const userId = ctx.from.id;
+    const state = userStates.get(userId);
+    
+    if (!state?.waitingForPhoto) return;
+    
+    const sock = waConnections.get(userId);
+    if (!sock) return;
+    
+    try {
+        await ctx.reply('🔄 *Mengupload foto grup...*', { parse_mode: 'Markdown' });
+        
+        // Download foto
+        const fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+        const fileUrl = await ctx.telegram.getFileLink(fileId);
+        
+        // Download file
+        const response = await fetch(fileUrl.href);
+        const buffer = await response.buffer();
+        
+        // Update profile picture grup
+        await sock.updateProfilePicture(state.groupId, buffer);
+        
+        await ctx.reply('✅ *Foto grup berhasil diupdate!*', { parse_mode: 'Markdown' });
+        
+        // Reset state
+        userStates.set(userId, { ...state, waitingForPhoto: false, groupId: null });
+        
+    } catch (error) {
+        console.error('Error uploading group photo:', error);
+        await ctx.reply('❌ *Gagal mengupload foto grup*\n\nPastikan Anda admin di grup tersebut', { parse_mode: 'Markdown' });
+    }
+});
+
 // Callback query handlers
 bot.action('cancel_connect', async (ctx) => {
     const userId = ctx.from.id;
-    const sock = waConnections.get(userId);
     
+    // Set flag cancelled
+    const connState = connectionStates.get(userId);
+    if (connState) {
+        connState.cancelled = true;
+    }
+    
+    // Hapus koneksi jika ada
+    const sock = waConnections.get(userId);
     if (sock) {
         sock.end();
         waConnections.delete(userId);
     }
     
+    // Hapus state
+    userStates.delete(userId);
+    connectionStates.delete(userId);
+    
+    // Hapus pesan QR
     await ctx.deleteMessage();
     await ctx.reply('❌ *Proses koneksi dibatalkan*', { parse_mode: 'Markdown' });
 });
@@ -336,6 +449,10 @@ bot.action('confirm_logout', async (ctx) => {
             await fs.rmdir(authFolder, { recursive: true });
         } catch (e) {}
     }
+    
+    // Hapus semua state
+    userStates.delete(userId);
+    connectionStates.delete(userId);
     
     await ctx.editMessageText('✅ *Berhasil logout dari WhatsApp*\n\nSesi telah dihapus', { parse_mode: 'Markdown' });
 });
@@ -392,6 +509,85 @@ bot.action(/toggle_send_(.+)/, async (ctx) => {
     }
 });
 
+bot.action(/toggle_add_(.+)/, async (ctx) => {
+    const groupId = ctx.match[1];
+    const userId = ctx.from.id;
+    const sock = waConnections.get(userId);
+    
+    if (!sock) return ctx.answerCbQuery('WhatsApp tidak terhubung!');
+    
+    try {
+        await ctx.answerCbQuery('🔄 Mengubah pengaturan...');
+        
+        // Toggle member add mode
+        const groupMetadata = await sock.groupMetadata(groupId);
+        await sock.groupMemberAddMode(groupId, groupMetadata.memberAddMode ? 'all_member_can_add' : 'admin_only');
+        
+        // Update message
+        await updateGroupMessage(ctx, sock, groupId);
+    } catch (error) {
+        await ctx.answerCbQuery('❌ Gagal mengubah pengaturan');
+    }
+});
+
+bot.action(/toggle_ephemeral_(.+)/, async (ctx) => {
+    const groupId = ctx.match[1];
+    const userId = ctx.from.id;
+    const sock = waConnections.get(userId);
+    
+    if (!sock) return ctx.answerCbQuery('WhatsApp tidak terhubung!');
+    
+    try {
+        await ctx.answerCbQuery('🔄 Mengubah pengaturan...');
+        
+        // Toggle ephemeral messages (24 hours or off)
+        const groupFullInfo = await getGroupFullInfo(sock, groupId);
+        const newDuration = groupFullInfo.ephemeral > 0 ? 0 : 86400; // 0 = off, 86400 = 24 hours
+        
+        await sock.groupToggleEphemeral(groupId, newDuration);
+        
+        // Update message
+        await updateGroupMessage(ctx, sock, groupId);
+    } catch (error) {
+        await ctx.answerCbQuery('❌ Gagal mengubah pengaturan');
+    }
+});
+
+bot.action(/toggle_approve_(.+)/, async (ctx) => {
+    const groupId = ctx.match[1];
+    const userId = ctx.from.id;
+    const sock = waConnections.get(userId);
+    
+    if (!sock) return ctx.answerCbQuery('WhatsApp tidak terhubung!');
+    
+    try {
+        await ctx.answerCbQuery('🔄 Mengubah pengaturan...');
+        
+        // Toggle join approval mode
+        const groupMetadata = await sock.groupMetadata(groupId);
+        await sock.groupJoinApprovalMode(groupId, groupMetadata.joinApprovalMode ? 'off' : 'on');
+        
+        // Update message
+        await updateGroupMessage(ctx, sock, groupId);
+    } catch (error) {
+        await ctx.answerCbQuery('❌ Gagal mengubah pengaturan');
+    }
+});
+
+bot.action(/upload_photo_(.+)/, async (ctx) => {
+    const groupId = ctx.match[1];
+    const userId = ctx.from.id;
+    const sock = waConnections.get(userId);
+    
+    if (!sock) return ctx.answerCbQuery('WhatsApp tidak terhubung!');
+    
+    await ctx.answerCbQuery();
+    await ctx.reply('📸 *Kirim foto untuk grup*\n\nSilakan kirim foto yang ingin dijadikan foto profil grup', { parse_mode: 'Markdown' });
+    
+    // Set state waiting for photo
+    userStates.set(userId, { waitingForPhoto: true, groupId });
+});
+
 bot.action(/refresh_(.+)/, async (ctx) => {
     const groupId = ctx.match[1];
     const userId = ctx.from.id;
@@ -410,14 +606,15 @@ bot.action(/refresh_(.+)/, async (ctx) => {
 // Function to update group message
 async function updateGroupMessage(ctx, sock, groupId) {
     try {
-        const groupMetadata = await sock.groupMetadata(groupId);
+        const groupFullInfo = await getGroupFullInfo(sock, groupId);
+        const groupMetadata = groupFullInfo.metadata;
         
         const settings = {
-            editInfo: groupMetadata.restrict ? 'ON' : 'OFF',
-            sendMessage: groupMetadata.announce ? 'ON' : 'OFF',
-            addMember: 'ALL',
-            ephemeral: 'OFF',
-            approveMembers: 'OFF'
+            editInfo: groupMetadata.restrict ? '🔒 ADMIN' : '✅ ALL',
+            sendMessage: groupMetadata.announce ? '🔒 ADMIN' : '✅ ALL',
+            addMember: groupMetadata.memberAddMode ? '🔒 ADMIN' : '✅ ALL',
+            ephemeral: groupFullInfo.ephemeral > 0 ? '✅ ON' : '❌ OFF',
+            approveMembers: groupMetadata.joinApprovalMode ? '✅ ON' : '❌ OFF'
         };
         
         const message = `
@@ -426,6 +623,7 @@ _${groupMetadata.subject}_
 
 👥 *Anggota:* ${groupMetadata.participants.length} orang
 📅 *Dibuat:* ${new Date(groupMetadata.creation * 1000).toLocaleDateString('id-ID')}
+${groupMetadata.desc ? `📝 *Deskripsi:* ${groupMetadata.desc}\n` : ''}
 
 ⚙️ *Pengaturan Grup Saat Ini:*
 ✅ *Berhasil diperbarui!*
