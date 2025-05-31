@@ -14,7 +14,7 @@ const bot = new Telegraf(BOT_TOKEN);
 global.crypto = crypto;
 
 // Admin Bot (ganti dengan ID Telegram admin)
-const ADMIN_IDS = [5988451717]; // Isi dengan user ID admin
+const ADMIN_IDS = [6903821235]; // Isi dengan user ID admin
 
 // Menyimpan koneksi WhatsApp per user
 const waConnections = new Map();
@@ -512,6 +512,15 @@ async function showBatchGroupManagement(ctx, sock, batchId, groups, errors) {
     });
 }
 
+// Safe answer callback query
+async function safeAnswerCbQuery(ctx, text, showAlert = false) {
+    try {
+        await ctx.answerCbQuery(text, { show_alert: showAlert });
+    } catch (error) {
+        console.error('Error answering callback query:', error);
+    }
+}
+
 // Batch handlers
 bot.action(/batch_edit_(on|off)_(.+)/, async (ctx) => {
     const action = ctx.match[1];
@@ -519,12 +528,12 @@ bot.action(/batch_edit_(on|off)_(.+)/, async (ctx) => {
     const userId = ctx.from.id;
     const sock = waConnections.get(userId);
     
-    if (!sock) return ctx.answerCbQuery('WhatsApp tidak terhubung!');
+    if (!sock) return safeAnswerCbQuery(ctx, 'WhatsApp tidak terhubung!');
     
     const groups = batchGroups.get(batchId);
-    if (!groups) return ctx.answerCbQuery('Sesi expired, kirim link grup lagi');
+    if (!groups) return safeAnswerCbQuery(ctx, 'Sesi expired, kirim link grup lagi');
     
-    await ctx.answerCbQuery('🔄 Memproses...');
+    await safeAnswerCbQuery(ctx, '🔄 Memproses...');
     
     let processed = 0;
     let skipped = 0;
@@ -556,7 +565,147 @@ bot.action(/batch_edit_(on|off)_(.+)/, async (ctx) => {
     }
     
     await showBatchGroupManagement(ctx, sock, batchId, groups, []);
-    await ctx.answerCbQuery(`✅ Diproses: ${processed}, Skip: ${skipped}`, { show_alert: true });
+    await ctx.reply(`✅ *Batch Update Selesai*\n\nDiproses: ${processed} grup\nDiskip: ${skipped} grup`, { parse_mode: 'Markdown' });
+});
+
+bot.action(/batch_send_(on|off)_(.+)/, async (ctx) => {
+    const action = ctx.match[1];
+    const batchId = ctx.match[2];
+    const userId = ctx.from.id;
+    const sock = waConnections.get(userId);
+    
+    if (!sock) return safeAnswerCbQuery(ctx, 'WhatsApp tidak terhubung!');
+    
+    const groups = batchGroups.get(batchId);
+    if (!groups) return safeAnswerCbQuery(ctx, 'Sesi expired, kirim link grup lagi');
+    
+    await safeAnswerCbQuery(ctx, '🔄 Memproses...');
+    
+    let processed = 0;
+    let skipped = 0;
+    
+    for (const group of groups) {
+        try {
+            const metadata = await sock.groupMetadata(group.id);
+            const currentAnnounce = metadata.announce;
+            const targetAnnounce = action === 'off';
+            
+            if (currentAnnounce !== targetAnnounce) {
+                await sock.groupSettingUpdate(group.id, targetAnnounce ? 'announcement' : 'not_announcement');
+                processed++;
+            } else {
+                skipped++;
+            }
+        } catch (error) {
+            console.error('Error batch send:', error);
+        }
+    }
+    
+    // Refresh data
+    for (let i = 0; i < groups.length; i++) {
+        try {
+            const groupFullInfo = await getGroupFullInfo(sock, groups[i].id);
+            groups[i].metadata = groupFullInfo.metadata;
+            groups[i].fullInfo = groupFullInfo;
+        } catch (error) {}
+    }
+    
+    await showBatchGroupManagement(ctx, sock, batchId, groups, []);
+    await ctx.reply(`✅ *Batch Update Selesai*\n\nDiproses: ${processed} grup\nDiskip: ${skipped} grup`, { parse_mode: 'Markdown' });
+});
+
+bot.action(/batch_add_(on|off)_(.+)/, async (ctx) => {
+    const action = ctx.match[1];
+    const batchId = ctx.match[2];
+    const userId = ctx.from.id;
+    const sock = waConnections.get(userId);
+    
+    if (!sock) return safeAnswerCbQuery(ctx, 'WhatsApp tidak terhubung!');
+    
+    const groups = batchGroups.get(batchId);
+    if (!groups) return safeAnswerCbQuery(ctx, 'Sesi expired, kirim link grup lagi');
+    
+    await safeAnswerCbQuery(ctx, '🔄 Memproses...');
+    
+    let processed = 0;
+    let skipped = 0;
+    
+    for (const group of groups) {
+        try {
+            const metadata = await sock.groupMetadata(group.id);
+            const currentAllCanAdd = metadata.memberAddMode === false;
+            const targetAllCanAdd = action === 'on';
+            
+            if (currentAllCanAdd !== targetAllCanAdd) {
+                // Use groupMemberAddMode method instead
+                await sock.groupMemberAddMode(group.id, targetAllCanAdd ? 'all_member_add' : 'admin_add');
+                processed++;
+            } else {
+                skipped++;
+            }
+        } catch (error) {
+            console.error('Error batch add:', error);
+        }
+    }
+    
+    // Refresh data
+    for (let i = 0; i < groups.length; i++) {
+        try {
+            const groupFullInfo = await getGroupFullInfo(sock, groups[i].id);
+            groups[i].metadata = groupFullInfo.metadata;
+            groups[i].fullInfo = groupFullInfo;
+        } catch (error) {}
+    }
+    
+    await showBatchGroupManagement(ctx, sock, batchId, groups, []);
+    await ctx.reply(`✅ *Batch Update Selesai*\n\nDiproses: ${processed} grup\nDiskip: ${skipped} grup`, { parse_mode: 'Markdown' });
+});
+
+bot.action(/batch_ephemeral_(on|off)_(.+)/, async (ctx) => {
+    const action = ctx.match[1];
+    const batchId = ctx.match[2];
+    const userId = ctx.from.id;
+    const sock = waConnections.get(userId);
+    
+    if (!sock) return safeAnswerCbQuery(ctx, 'WhatsApp tidak terhubung!');
+    
+    const groups = batchGroups.get(batchId);
+    if (!groups) return safeAnswerCbQuery(ctx, 'Sesi expired, kirim link grup lagi');
+    
+    await safeAnswerCbQuery(ctx, '🔄 Memproses...');
+    
+    let processed = 0;
+    let skipped = 0;
+    
+    for (const group of groups) {
+        try {
+            const groupFullInfo = await getGroupFullInfo(sock, group.id);
+            const currentEphemeral = groupFullInfo.ephemeral > 0;
+            const targetEphemeral = action === 'on';
+            
+            if (currentEphemeral !== targetEphemeral) {
+                const newDuration = targetEphemeral ? 86400 : 0; // 24 hours or off
+                await sock.groupToggleEphemeral(group.id, newDuration);
+                processed++;
+            } else {
+                skipped++;
+            }
+        } catch (error) {
+            console.error('Error batch ephemeral:', error);
+        }
+    }
+    
+    // Refresh data
+    for (let i = 0; i < groups.length; i++) {
+        try {
+            const groupFullInfo = await getGroupFullInfo(sock, groups[i].id);
+            groups[i].metadata = groupFullInfo.metadata;
+            groups[i].fullInfo = groupFullInfo;
+        } catch (error) {}
+    }
+    
+    await showBatchGroupManagement(ctx, sock, batchId, groups, []);
+    await ctx.reply(`✅ *Batch Update Selesai*\n\nDiproses: ${processed} grup\nDiskip: ${skipped} grup`, { parse_mode: 'Markdown' });
 });
 
 bot.action(/batch_approve_(on|off)_(.+)/, async (ctx) => {
@@ -565,12 +714,12 @@ bot.action(/batch_approve_(on|off)_(.+)/, async (ctx) => {
     const userId = ctx.from.id;
     const sock = waConnections.get(userId);
     
-    if (!sock) return ctx.answerCbQuery('WhatsApp tidak terhubung!');
+    if (!sock) return safeAnswerCbQuery(ctx, 'WhatsApp tidak terhubung!');
     
     const groups = batchGroups.get(batchId);
-    if (!groups) return ctx.answerCbQuery('Sesi expired, kirim link grup lagi');
+    if (!groups) return safeAnswerCbQuery(ctx, 'Sesi expired, kirim link grup lagi');
     
-    await ctx.answerCbQuery('🔄 Memproses...');
+    await safeAnswerCbQuery(ctx, '🔄 Memproses...');
     
     let processed = 0;
     let skipped = 0;
@@ -603,7 +752,7 @@ bot.action(/batch_approve_(on|off)_(.+)/, async (ctx) => {
     }
     
     await showBatchGroupManagement(ctx, sock, batchId, groups, []);
-    await ctx.answerCbQuery(`✅ Diproses: ${processed}, Skip: ${skipped}`, { show_alert: true });
+    await ctx.reply(`✅ *Batch Update Selesai*\n\nDiproses: ${processed} grup\nDiskip: ${skipped} grup`, { parse_mode: 'Markdown' });
 });
 
 // Refresh batch
@@ -612,12 +761,12 @@ bot.action(/refresh_batch_(.+)/, async (ctx) => {
     const userId = ctx.from.id;
     const sock = waConnections.get(userId);
     
-    if (!sock) return ctx.answerCbQuery('WhatsApp tidak terhubung!');
+    if (!sock) return safeAnswerCbQuery(ctx, 'WhatsApp tidak terhubung!');
     
     const groups = batchGroups.get(batchId);
-    if (!groups) return ctx.answerCbQuery('Sesi expired, kirim link grup lagi');
+    if (!groups) return safeAnswerCbQuery(ctx, 'Sesi expired, kirim link grup lagi');
     
-    await ctx.answerCbQuery('🔄 Memperbarui...');
+    await safeAnswerCbQuery(ctx, '🔄 Memperbarui...');
     
     // Refresh all groups data
     for (let i = 0; i < groups.length; i++) {
@@ -688,7 +837,7 @@ bot.action('cancel_logout', async (ctx) => {
 
 bot.action('close_menu', async (ctx) => {
     await ctx.deleteMessage();
-    await ctx.answerCbQuery('Menu ditutup');
+    await safeAnswerCbQuery(ctx, 'Menu ditutup');
 });
 
 // Toggle handlers for single group
@@ -697,10 +846,10 @@ bot.action(/toggle_edit_(.+)/, async (ctx) => {
     const userId = ctx.from.id;
     const sock = waConnections.get(userId);
     
-    if (!sock) return ctx.answerCbQuery('WhatsApp tidak terhubung!');
+    if (!sock) return safeAnswerCbQuery(ctx, 'WhatsApp tidak terhubung!');
     
     try {
-        await ctx.answerCbQuery('🔄 Mengubah pengaturan...');
+        await safeAnswerCbQuery(ctx, '🔄 Mengubah pengaturan...');
         
         // Toggle restrict setting (Edit Info Grup)
         const groupMetadata = await sock.groupMetadata(groupId);
@@ -710,7 +859,7 @@ bot.action(/toggle_edit_(.+)/, async (ctx) => {
         await updateGroupMessage(ctx, sock, groupId);
     } catch (error) {
         console.error('Error toggle edit:', error);
-        await ctx.answerCbQuery('❌ Gagal mengubah pengaturan');
+        await safeAnswerCbQuery(ctx, '❌ Gagal mengubah pengaturan', true);
     }
 });
 
@@ -719,10 +868,10 @@ bot.action(/toggle_send_(.+)/, async (ctx) => {
     const userId = ctx.from.id;
     const sock = waConnections.get(userId);
     
-    if (!sock) return ctx.answerCbQuery('WhatsApp tidak terhubung!');
+    if (!sock) return safeAnswerCbQuery(ctx, 'WhatsApp tidak terhubung!');
     
     try {
-        await ctx.answerCbQuery('🔄 Mengubah pengaturan...');
+        await safeAnswerCbQuery(ctx, '🔄 Mengubah pengaturan...');
         
         // Toggle announce setting (Kirim Pesan)
         const groupMetadata = await sock.groupMetadata(groupId);
@@ -732,7 +881,7 @@ bot.action(/toggle_send_(.+)/, async (ctx) => {
         await updateGroupMessage(ctx, sock, groupId);
     } catch (error) {
         console.error('Error toggle send:', error);
-        await ctx.answerCbQuery('❌ Gagal mengubah pengaturan');
+        await safeAnswerCbQuery(ctx, '❌ Gagal mengubah pengaturan', true);
     }
 });
 
@@ -741,10 +890,10 @@ bot.action(/toggle_add_(.+)/, async (ctx) => {
     const userId = ctx.from.id;
     const sock = waConnections.get(userId);
     
-    if (!sock) return ctx.answerCbQuery('WhatsApp tidak terhubung!');
+    if (!sock) return safeAnswerCbQuery(ctx, 'WhatsApp tidak terhubung!');
     
     try {
-        await ctx.answerCbQuery('🔄 Mengubah pengaturan...');
+        await safeAnswerCbQuery(ctx, '🔄 Mengubah pengaturan...');
         
         // Get fresh metadata
         const groupMetadata = await sock.groupMetadata(groupId);
@@ -752,15 +901,15 @@ bot.action(/toggle_add_(.+)/, async (ctx) => {
         // Toggle member add setting - Fixed logic
         // memberAddMode: false = all can add, true = only admin can add
         const currentAllCanAdd = groupMetadata.memberAddMode === false;
-        const newSetting = currentAllCanAdd ? 'add_mode_admin' : 'add_mode_all';
         
-        await sock.groupSettingUpdate(groupId, newSetting);
+        // Use groupMemberAddMode method instead of groupSettingUpdate
+        await sock.groupMemberAddMode(groupId, currentAllCanAdd ? 'admin_add' : 'all_member_add');
         
         // Update message
         await updateGroupMessage(ctx, sock, groupId);
     } catch (error) {
         console.error('Error toggle add member:', error);
-        await ctx.answerCbQuery('❌ Gagal mengubah pengaturan');
+        await safeAnswerCbQuery(ctx, '❌ Gagal mengubah pengaturan', true);
     }
 });
 
@@ -769,10 +918,10 @@ bot.action(/toggle_ephemeral_(.+)/, async (ctx) => {
     const userId = ctx.from.id;
     const sock = waConnections.get(userId);
     
-    if (!sock) return ctx.answerCbQuery('WhatsApp tidak terhubung!');
+    if (!sock) return safeAnswerCbQuery(ctx, 'WhatsApp tidak terhubung!');
     
     try {
-        await ctx.answerCbQuery('🔄 Mengubah pengaturan...');
+        await safeAnswerCbQuery(ctx, '🔄 Mengubah pengaturan...');
         
         // Toggle ephemeral messages (24 hours or off)
         const groupFullInfo = await getGroupFullInfo(sock, groupId);
@@ -784,7 +933,7 @@ bot.action(/toggle_ephemeral_(.+)/, async (ctx) => {
         await updateGroupMessage(ctx, sock, groupId);
     } catch (error) {
         console.error('Error toggle ephemeral:', error);
-        await ctx.answerCbQuery('❌ Gagal mengubah pengaturan');
+        await safeAnswerCbQuery(ctx, '❌ Gagal mengubah pengaturan', true);
     }
 });
 
@@ -793,10 +942,10 @@ bot.action(/toggle_approve_(.+)/, async (ctx) => {
     const userId = ctx.from.id;
     const sock = waConnections.get(userId);
     
-    if (!sock) return ctx.answerCbQuery('WhatsApp tidak terhubung!');
+    if (!sock) return safeAnswerCbQuery(ctx, 'WhatsApp tidak terhubung!');
     
     try {
-        await ctx.answerCbQuery('🔄 Mengubah pengaturan...');
+        await safeAnswerCbQuery(ctx, '🔄 Mengubah pengaturan...');
         
         // Toggle join approval mode  
         const groupMetadata = await sock.groupMetadata(groupId);
@@ -809,7 +958,7 @@ bot.action(/toggle_approve_(.+)/, async (ctx) => {
         await updateGroupMessage(ctx, sock, groupId);
     } catch (error) {
         console.error('Error toggle approve:', error);
-        await ctx.answerCbQuery('❌ Gagal mengubah pengaturan');
+        await safeAnswerCbQuery(ctx, '❌ Gagal mengubah pengaturan', true);
     }
 });
 
@@ -818,13 +967,13 @@ bot.action(/refresh_(.+)/, async (ctx) => {
     const userId = ctx.from.id;
     const sock = waConnections.get(userId);
     
-    if (!sock) return ctx.answerCbQuery('WhatsApp tidak terhubung!');
+    if (!sock) return safeAnswerCbQuery(ctx, 'WhatsApp tidak terhubung!');
     
     try {
-        await ctx.answerCbQuery('🔄 Memperbarui...');
+        await safeAnswerCbQuery(ctx, '🔄 Memperbarui...');
         await updateGroupMessage(ctx, sock, groupId);
     } catch (error) {
-        await ctx.answerCbQuery('❌ Gagal memperbarui');
+        await safeAnswerCbQuery(ctx, '❌ Gagal memperbarui', true);
     }
 });
 
