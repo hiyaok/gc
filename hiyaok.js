@@ -14,7 +14,7 @@ const bot = new Telegraf(BOT_TOKEN);
 global.crypto = crypto;
 
 // Admin Bot (ganti dengan ID Telegram admin)
-const ADMIN_IDS = [5988451717]; // Isi dengan user ID admin
+const ADMIN_IDS = [6903821235]; // Isi dengan user ID admin
 
 // Menyimpan koneksi WhatsApp per user
 const waConnections = new Map();
@@ -340,23 +340,41 @@ bot.on('text', async (ctx) => {
         const inviteCode = match[1];
         
         try {
-            // Join group if not already joined
-            const groupId = await sock.groupAcceptInvite(inviteCode);
+            // Get group metadata via invite code
+            const inviteInfo = await sock.groupGetInviteInfo(inviteCode);
+            let groupId = inviteInfo.id;
             
-            // Get group metadata dan info lengkap
+            // Check if already in group
+            const myGroups = await sock.groupFetchAllParticipating();
+            const isAlreadyInGroup = Object.keys(myGroups).includes(groupId);
+            
+            if (!isAlreadyInGroup) {
+                // Join group if not already joined
+                groupId = await sock.groupAcceptInvite(inviteCode);
+                // Wait a bit after joining
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+            
+            // Get fresh group metadata
             const groupFullInfo = await getGroupFullInfo(sock, groupId);
             const groupMetadata = groupFullInfo.metadata;
+            
+            // Check if bot is admin
+            const botNumber = sock.user.id.split('@')[0] + '@s.whatsapp.net';
+            const botParticipant = groupMetadata.participants.find(p => p.id === botNumber);
+            const isBotAdmin = botParticipant?.admin === 'admin' || botParticipant?.admin === 'superadmin';
             
             groups.push({
                 id: groupId,
                 name: groupMetadata.subject,
                 metadata: groupMetadata,
-                fullInfo: groupFullInfo
+                fullInfo: groupFullInfo,
+                isBotAdmin: isBotAdmin
             });
             
         } catch (error) {
             console.error('Error processing group link:', error);
-            errors.push(inviteCode);
+            errors.push({ code: inviteCode, error: error.message });
         }
     }
     
@@ -366,7 +384,15 @@ bot.on('text', async (ctx) => {
     } catch (e) {}
     
     if (groups.length === 0) {
-        return ctx.reply('❌ *Gagal memproses semua link grup*\n\nPastikan link valid dan bot memiliki akses', { parse_mode: 'Markdown' });
+        let errorMsg = '❌ *Gagal memproses semua link grup*\n\n';
+        if (errors.length > 0) {
+            errorMsg += '*Detail Error:*\n';
+            errors.forEach((err, idx) => {
+                errorMsg += `${idx + 1}. ${err.error}\n`;
+            });
+        }
+        errorMsg += '\nPastikan link valid dan bot memiliki akses';
+        return ctx.reply(errorMsg, { parse_mode: 'Markdown' });
     }
     
     // Store groups for batch processing
@@ -392,7 +418,7 @@ async function showSingleGroupManagement(ctx, sock, group) {
     const settings = {
         editInfo: groupMetadata.restrict ? '❌ OFF' : '✅ ON',
         sendMessage: groupMetadata.announce ? '❌ OFF' : '✅ ON',
-        addMember: groupMetadata.memberAddMode === false ? '✅ ON' : '❌ OFF',
+        addMember: !groupMetadata.memberAddMode ? '✅ ON' : '❌ OFF', // Fixed logic
         ephemeral: groupFullInfo.ephemeral > 0 ? '✅ ON' : '❌ OFF',
         approveMembers: groupMetadata.joinApprovalMode ? '✅ ON' : '❌ OFF'
     };
@@ -403,9 +429,11 @@ _${groupMetadata.subject}_
 
 👥 *Anggota:* ${groupMetadata.participants.length} orang
 📅 *Dibuat:* ${new Date(groupMetadata.creation * 1000).toLocaleDateString('id-ID')}
+🤖 *Status Bot:* ${group.isBotAdmin ? '✅ Admin' : '❌ Bukan Admin'}
 ${groupMetadata.desc ? `📝 *Deskripsi:* ${groupMetadata.desc}\n` : ''}
 
 ⚙️ *Pengaturan Grup Saat Ini:*
+${!group.isBotAdmin ? '\n⚠️ *Bot perlu jadi admin untuk mengubah pengaturan!*' : ''}
     `;
     
     const keyboard = [
@@ -432,12 +460,18 @@ async function showBatchGroupManagement(ctx, sock, batchId, groups, errors) {
         sendMessage: { on: 0, off: 0 },
         addMember: { on: 0, off: 0 },
         ephemeral: { on: 0, off: 0 },
-        approveMembers: { on: 0, off: 0 }
+        approveMembers: { on: 0, off: 0 },
+        adminCount: 0,
+        nonAdminCount: 0
     };
     
     groups.forEach(group => {
         const metadata = group.metadata;
         const fullInfo = group.fullInfo;
+        
+        // Admin status
+        if (group.isBotAdmin) stats.adminCount++;
+        else stats.nonAdminCount++;
         
         // Edit Info
         if (metadata.restrict) stats.editInfo.off++;
@@ -447,8 +481,8 @@ async function showBatchGroupManagement(ctx, sock, batchId, groups, errors) {
         if (metadata.announce) stats.sendMessage.off++;
         else stats.sendMessage.on++;
         
-        // Add Member
-        if (metadata.memberAddMode === false) stats.addMember.on++;
+        // Add Member - Fixed logic
+        if (!metadata.memberAddMode) stats.addMember.on++;
         else stats.addMember.off++;
         
         // Ephemeral
@@ -464,12 +498,17 @@ async function showBatchGroupManagement(ctx, sock, batchId, groups, errors) {
     
     // Show groups list
     groups.forEach((group, index) => {
-        message += `${index + 1}. *${group.name}* (${group.metadata.participants.length} anggota)\n`;
+        const adminStatus = group.isBotAdmin ? '✅' : '❌';
+        message += `${index + 1}. ${adminStatus} *${group.name}* (${group.metadata.participants.length} anggota)\n`;
     });
     
     if (errors.length > 0) {
         message += `\n⚠️ *${errors.length} link gagal diproses*\n`;
     }
+    
+    message += `\n📊 *Status Bot:*\n`;
+    message += `✅ Admin di ${stats.adminCount} grup\n`;
+    message += `❌ Bukan admin di ${stats.nonAdminCount} grup\n`;
     
     message += `\n📊 *Statistik Pengaturan:*\n`;
     message += `📝 Edit Info: ${stats.editInfo.on} ON, ${stats.editInfo.off} OFF\n`;
@@ -480,6 +519,9 @@ async function showBatchGroupManagement(ctx, sock, batchId, groups, errors) {
     
     message += `\n💡 *Gunakan tombol di bawah untuk mengubah semua grup sekaligus*`;
     message += `\n_Bot akan skip grup yang sudah sesuai settingannya_`;
+    if (stats.nonAdminCount > 0) {
+        message += `\n_⚠️ Bot hanya bisa ubah setting di grup dimana bot adalah admin_`;
+    }
     
     const keyboard = [
         [
@@ -537,8 +579,14 @@ bot.action(/batch_edit_(on|off)_(.+)/, async (ctx) => {
     
     let processed = 0;
     let skipped = 0;
+    let failed = 0;
     
     for (const group of groups) {
+        if (!group.isBotAdmin) {
+            skipped++;
+            continue;
+        }
+        
         try {
             const metadata = await sock.groupMetadata(group.id);
             const currentRestrict = metadata.restrict;
@@ -547,11 +595,13 @@ bot.action(/batch_edit_(on|off)_(.+)/, async (ctx) => {
             if (currentRestrict !== targetRestrict) {
                 await sock.groupSettingUpdate(group.id, targetRestrict ? 'locked' : 'unlocked');
                 processed++;
+                await new Promise(resolve => setTimeout(resolve, 500)); // Delay to avoid rate limit
             } else {
                 skipped++;
             }
         } catch (error) {
             console.error('Error batch edit:', error);
+            failed++;
         }
     }
     
@@ -565,7 +615,7 @@ bot.action(/batch_edit_(on|off)_(.+)/, async (ctx) => {
     }
     
     await showBatchGroupManagement(ctx, sock, batchId, groups, []);
-    await ctx.reply(`✅ *Batch Update Selesai*\n\nDiproses: ${processed} grup\nDiskip: ${skipped} grup`, { parse_mode: 'Markdown' });
+    await ctx.reply(`✅ *Batch Update Selesai*\n\nDiproses: ${processed} grup\nDiskip: ${skipped} grup${failed > 0 ? `\nGagal: ${failed} grup` : ''}`, { parse_mode: 'Markdown' });
 });
 
 bot.action(/batch_send_(on|off)_(.+)/, async (ctx) => {
@@ -583,8 +633,14 @@ bot.action(/batch_send_(on|off)_(.+)/, async (ctx) => {
     
     let processed = 0;
     let skipped = 0;
+    let failed = 0;
     
     for (const group of groups) {
+        if (!group.isBotAdmin) {
+            skipped++;
+            continue;
+        }
+        
         try {
             const metadata = await sock.groupMetadata(group.id);
             const currentAnnounce = metadata.announce;
@@ -593,11 +649,13 @@ bot.action(/batch_send_(on|off)_(.+)/, async (ctx) => {
             if (currentAnnounce !== targetAnnounce) {
                 await sock.groupSettingUpdate(group.id, targetAnnounce ? 'announcement' : 'not_announcement');
                 processed++;
+                await new Promise(resolve => setTimeout(resolve, 500));
             } else {
                 skipped++;
             }
         } catch (error) {
             console.error('Error batch send:', error);
+            failed++;
         }
     }
     
@@ -611,7 +669,7 @@ bot.action(/batch_send_(on|off)_(.+)/, async (ctx) => {
     }
     
     await showBatchGroupManagement(ctx, sock, batchId, groups, []);
-    await ctx.reply(`✅ *Batch Update Selesai*\n\nDiproses: ${processed} grup\nDiskip: ${skipped} grup`, { parse_mode: 'Markdown' });
+    await ctx.reply(`✅ *Batch Update Selesai*\n\nDiproses: ${processed} grup\nDiskip: ${skipped} grup${failed > 0 ? `\nGagal: ${failed} grup` : ''}`, { parse_mode: 'Markdown' });
 });
 
 bot.action(/batch_add_(on|off)_(.+)/, async (ctx) => {
@@ -629,22 +687,36 @@ bot.action(/batch_add_(on|off)_(.+)/, async (ctx) => {
     
     let processed = 0;
     let skipped = 0;
+    let failed = 0;
     
     for (const group of groups) {
+        if (!group.isBotAdmin) {
+            skipped++;
+            continue;
+        }
+        
         try {
             const metadata = await sock.groupMetadata(group.id);
-            const currentAllCanAdd = metadata.memberAddMode === false;
+            const currentAllCanAdd = !metadata.memberAddMode; // Fixed logic
             const targetAllCanAdd = action === 'on';
             
             if (currentAllCanAdd !== targetAllCanAdd) {
-                // Use groupMemberAddMode method instead
-                await sock.groupMemberAddMode(group.id, targetAllCanAdd ? 'all_member_add' : 'admin_add');
+                // Use correct method for member add mode
+                if (targetAllCanAdd) {
+                    // Allow all members to add
+                    await sock.groupSettingUpdate(group.id, 'member_add_mode', 'all_member_add');
+                } else {
+                    // Only admin can add
+                    await sock.groupSettingUpdate(group.id, 'member_add_mode', 'admin_add');
+                }
                 processed++;
+                await new Promise(resolve => setTimeout(resolve, 500));
             } else {
                 skipped++;
             }
         } catch (error) {
             console.error('Error batch add:', error);
+            failed++;
         }
     }
     
@@ -658,7 +730,7 @@ bot.action(/batch_add_(on|off)_(.+)/, async (ctx) => {
     }
     
     await showBatchGroupManagement(ctx, sock, batchId, groups, []);
-    await ctx.reply(`✅ *Batch Update Selesai*\n\nDiproses: ${processed} grup\nDiskip: ${skipped} grup`, { parse_mode: 'Markdown' });
+    await ctx.reply(`✅ *Batch Update Selesai*\n\nDiproses: ${processed} grup\nDiskip: ${skipped} grup${failed > 0 ? `\nGagal: ${failed} grup` : ''}`, { parse_mode: 'Markdown' });
 });
 
 bot.action(/batch_ephemeral_(on|off)_(.+)/, async (ctx) => {
@@ -676,8 +748,14 @@ bot.action(/batch_ephemeral_(on|off)_(.+)/, async (ctx) => {
     
     let processed = 0;
     let skipped = 0;
+    let failed = 0;
     
     for (const group of groups) {
+        if (!group.isBotAdmin) {
+            skipped++;
+            continue;
+        }
+        
         try {
             const groupFullInfo = await getGroupFullInfo(sock, group.id);
             const currentEphemeral = groupFullInfo.ephemeral > 0;
@@ -687,11 +765,13 @@ bot.action(/batch_ephemeral_(on|off)_(.+)/, async (ctx) => {
                 const newDuration = targetEphemeral ? 86400 : 0; // 24 hours or off
                 await sock.groupToggleEphemeral(group.id, newDuration);
                 processed++;
+                await new Promise(resolve => setTimeout(resolve, 500));
             } else {
                 skipped++;
             }
         } catch (error) {
             console.error('Error batch ephemeral:', error);
+            failed++;
         }
     }
     
@@ -705,7 +785,7 @@ bot.action(/batch_ephemeral_(on|off)_(.+)/, async (ctx) => {
     }
     
     await showBatchGroupManagement(ctx, sock, batchId, groups, []);
-    await ctx.reply(`✅ *Batch Update Selesai*\n\nDiproses: ${processed} grup\nDiskip: ${skipped} grup`, { parse_mode: 'Markdown' });
+    await ctx.reply(`✅ *Batch Update Selesai*\n\nDiproses: ${processed} grup\nDiskip: ${skipped} grup${failed > 0 ? `\nGagal: ${failed} grup` : ''}`, { parse_mode: 'Markdown' });
 });
 
 bot.action(/batch_approve_(on|off)_(.+)/, async (ctx) => {
@@ -723,8 +803,14 @@ bot.action(/batch_approve_(on|off)_(.+)/, async (ctx) => {
     
     let processed = 0;
     let skipped = 0;
+    let failed = 0;
     
     for (const group of groups) {
+        if (!group.isBotAdmin) {
+            skipped++;
+            continue;
+        }
+        
         try {
             const metadata = await sock.groupMetadata(group.id);
             const currentApprove = metadata.joinApprovalMode;
@@ -734,11 +820,13 @@ bot.action(/batch_approve_(on|off)_(.+)/, async (ctx) => {
                 const mode = targetApprove ? 'on' : 'off';
                 await sock.groupJoinApprovalMode(group.id, mode);
                 processed++;
+                await new Promise(resolve => setTimeout(resolve, 500));
             } else {
                 skipped++;
             }
         } catch (error) {
             console.error('Error batch approve:', error);
+            failed++;
         }
     }
     
@@ -752,7 +840,7 @@ bot.action(/batch_approve_(on|off)_(.+)/, async (ctx) => {
     }
     
     await showBatchGroupManagement(ctx, sock, batchId, groups, []);
-    await ctx.reply(`✅ *Batch Update Selesai*\n\nDiproses: ${processed} grup\nDiskip: ${skipped} grup`, { parse_mode: 'Markdown' });
+    await ctx.reply(`✅ *Batch Update Selesai*\n\nDiproses: ${processed} grup\nDiskip: ${skipped} grup${failed > 0 ? `\nGagal: ${failed} grup` : ''}`, { parse_mode: 'Markdown' });
 });
 
 // Refresh batch
@@ -774,6 +862,11 @@ bot.action(/refresh_batch_(.+)/, async (ctx) => {
             const groupFullInfo = await getGroupFullInfo(sock, groups[i].id);
             groups[i].metadata = groupFullInfo.metadata;
             groups[i].fullInfo = groupFullInfo;
+            
+            // Update bot admin status
+            const botNumber = sock.user.id.split('@')[0] + '@s.whatsapp.net';
+            const botParticipant = groupFullInfo.metadata.participants.find(p => p.id === botNumber);
+            groups[i].isBotAdmin = botParticipant?.admin === 'admin' || botParticipant?.admin === 'superadmin';
         } catch (error) {
             console.error('Error refreshing group:', error);
         }
@@ -849,11 +942,20 @@ bot.action(/toggle_edit_(.+)/, async (ctx) => {
     if (!sock) return safeAnswerCbQuery(ctx, 'WhatsApp tidak terhubung!');
     
     try {
+        // Check if bot is admin
+        const metadata = await sock.groupMetadata(groupId);
+        const botNumber = sock.user.id.split('@')[0] + '@s.whatsapp.net';
+        const botParticipant = metadata.participants.find(p => p.id === botNumber);
+        const isBotAdmin = botParticipant?.admin === 'admin' || botParticipant?.admin === 'superadmin';
+        
+        if (!isBotAdmin) {
+            return safeAnswerCbQuery(ctx, '❌ Bot harus jadi admin untuk mengubah setting!', true);
+        }
+        
         await safeAnswerCbQuery(ctx, '🔄 Mengubah pengaturan...');
         
         // Toggle restrict setting (Edit Info Grup)
-        const groupMetadata = await sock.groupMetadata(groupId);
-        await sock.groupSettingUpdate(groupId, groupMetadata.restrict ? 'unlocked' : 'locked');
+        await sock.groupSettingUpdate(groupId, metadata.restrict ? 'unlocked' : 'locked');
         
         // Update message
         await updateGroupMessage(ctx, sock, groupId);
@@ -871,11 +973,19 @@ bot.action(/toggle_send_(.+)/, async (ctx) => {
     if (!sock) return safeAnswerCbQuery(ctx, 'WhatsApp tidak terhubung!');
     
     try {
+        const metadata = await sock.groupMetadata(groupId);
+        const botNumber = sock.user.id.split('@')[0] + '@s.whatsapp.net';
+        const botParticipant = metadata.participants.find(p => p.id === botNumber);
+        const isBotAdmin = botParticipant?.admin === 'admin' || botParticipant?.admin === 'superadmin';
+        
+        if (!isBotAdmin) {
+            return safeAnswerCbQuery(ctx, '❌ Bot harus jadi admin untuk mengubah setting!', true);
+        }
+        
         await safeAnswerCbQuery(ctx, '🔄 Mengubah pengaturan...');
         
         // Toggle announce setting (Kirim Pesan)
-        const groupMetadata = await sock.groupMetadata(groupId);
-        await sock.groupSettingUpdate(groupId, groupMetadata.announce ? 'not_announcement' : 'announcement');
+        await sock.groupSettingUpdate(groupId, metadata.announce ? 'not_announcement' : 'announcement');
         
         // Update message
         await updateGroupMessage(ctx, sock, groupId);
@@ -893,17 +1003,28 @@ bot.action(/toggle_add_(.+)/, async (ctx) => {
     if (!sock) return safeAnswerCbQuery(ctx, 'WhatsApp tidak terhubung!');
     
     try {
+        const metadata = await sock.groupMetadata(groupId);
+        const botNumber = sock.user.id.split('@')[0] + '@s.whatsapp.net';
+        const botParticipant = metadata.participants.find(p => p.id === botNumber);
+        const isBotAdmin = botParticipant?.admin === 'admin' || botParticipant?.admin === 'superadmin';
+        
+        if (!isBotAdmin) {
+            return safeAnswerCbQuery(ctx, '❌ Bot harus jadi admin untuk mengubah setting!', true);
+        }
+        
         await safeAnswerCbQuery(ctx, '🔄 Mengubah pengaturan...');
         
-        // Get fresh metadata
-        const groupMetadata = await sock.groupMetadata(groupId);
-        
         // Toggle member add setting - Fixed logic
-        // memberAddMode: false = all can add, true = only admin can add
-        const currentAllCanAdd = groupMetadata.memberAddMode === false;
+        const currentAllCanAdd = !metadata.memberAddMode;
         
-        // Use groupMemberAddMode method instead of groupSettingUpdate
-        await sock.groupMemberAddMode(groupId, currentAllCanAdd ? 'admin_add' : 'all_member_add');
+        // Use correct method with proper parameters
+        if (currentAllCanAdd) {
+            // Currently all can add, change to admin only
+            await sock.groupSettingUpdate(groupId, 'member_add_mode', 'admin_add');
+        } else {
+            // Currently admin only, change to all can add
+            await sock.groupSettingUpdate(groupId, 'member_add_mode', 'all_member_add');
+        }
         
         // Update message
         await updateGroupMessage(ctx, sock, groupId);
@@ -921,6 +1042,15 @@ bot.action(/toggle_ephemeral_(.+)/, async (ctx) => {
     if (!sock) return safeAnswerCbQuery(ctx, 'WhatsApp tidak terhubung!');
     
     try {
+        const metadata = await sock.groupMetadata(groupId);
+        const botNumber = sock.user.id.split('@')[0] + '@s.whatsapp.net';
+        const botParticipant = metadata.participants.find(p => p.id === botNumber);
+        const isBotAdmin = botParticipant?.admin === 'admin' || botParticipant?.admin === 'superadmin';
+        
+        if (!isBotAdmin) {
+            return safeAnswerCbQuery(ctx, '❌ Bot harus jadi admin untuk mengubah setting!', true);
+        }
+        
         await safeAnswerCbQuery(ctx, '🔄 Mengubah pengaturan...');
         
         // Toggle ephemeral messages (24 hours or off)
@@ -945,11 +1075,19 @@ bot.action(/toggle_approve_(.+)/, async (ctx) => {
     if (!sock) return safeAnswerCbQuery(ctx, 'WhatsApp tidak terhubung!');
     
     try {
+        const metadata = await sock.groupMetadata(groupId);
+        const botNumber = sock.user.id.split('@')[0] + '@s.whatsapp.net';
+        const botParticipant = metadata.participants.find(p => p.id === botNumber);
+        const isBotAdmin = botParticipant?.admin === 'admin' || botParticipant?.admin === 'superadmin';
+        
+        if (!isBotAdmin) {
+            return safeAnswerCbQuery(ctx, '❌ Bot harus jadi admin untuk mengubah setting!', true);
+        }
+        
         await safeAnswerCbQuery(ctx, '🔄 Mengubah pengaturan...');
         
         // Toggle join approval mode  
-        const groupMetadata = await sock.groupMetadata(groupId);
-        const mode = groupMetadata.joinApprovalMode ? 'off' : 'on';
+        const mode = metadata.joinApprovalMode ? 'off' : 'on';
         
         // Update join approval mode
         await sock.groupJoinApprovalMode(groupId, mode);
@@ -983,11 +1121,16 @@ async function updateGroupMessage(ctx, sock, groupId) {
         const groupFullInfo = await getGroupFullInfo(sock, groupId);
         const groupMetadata = groupFullInfo.metadata;
         
+        // Check bot admin status
+        const botNumber = sock.user.id.split('@')[0] + '@s.whatsapp.net';
+        const botParticipant = groupMetadata.participants.find(p => p.id === botNumber);
+        const isBotAdmin = botParticipant?.admin === 'admin' || botParticipant?.admin === 'superadmin';
+        
         // Get current settings dengan logic yang benar
         const settings = {
             editInfo: groupMetadata.restrict ? '❌ OFF' : '✅ ON',
             sendMessage: groupMetadata.announce ? '❌ OFF' : '✅ ON',
-            addMember: groupMetadata.memberAddMode === false ? '✅ ON' : '❌ OFF',
+            addMember: !groupMetadata.memberAddMode ? '✅ ON' : '❌ OFF', // Fixed logic
             ephemeral: groupFullInfo.ephemeral > 0 ? '✅ ON' : '❌ OFF',
             approveMembers: groupMetadata.joinApprovalMode ? '✅ ON' : '❌ OFF'
         };
@@ -998,10 +1141,12 @@ _${groupMetadata.subject}_
 
 👥 *Anggota:* ${groupMetadata.participants.length} orang
 📅 *Dibuat:* ${new Date(groupMetadata.creation * 1000).toLocaleDateString('id-ID')}
+🤖 *Status Bot:* ${isBotAdmin ? '✅ Admin' : '❌ Bukan Admin'}
 ${groupMetadata.desc ? `📝 *Deskripsi:* ${groupMetadata.desc}\n` : ''}
 
 ⚙️ *Pengaturan Grup Saat Ini:*
 ✅ *Berhasil diperbarui!*
+${!isBotAdmin ? '\n⚠️ *Bot perlu jadi admin untuk mengubah pengaturan!*' : ''}
         `;
         
         const keyboard = [
