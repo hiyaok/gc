@@ -14,12 +14,13 @@ const bot = new Telegraf(BOT_TOKEN);
 global.crypto = crypto;
 
 // Admin Bot (ganti dengan ID Telegram admin)
-const ADMIN_IDS = [6903821235]; // Isi dengan user ID admin
+const ADMIN_IDS = [5988451717]; // Isi dengan user ID admin
 
 // Menyimpan koneksi WhatsApp per user
 const waConnections = new Map();
 const userStates = new Map();
 const connectionStates = new Map();
+const batchGroups = new Map(); // Menyimpan grup-grup untuk batch processing
 
 // Middleware untuk cek admin
 const isAdmin = (ctx) => {
@@ -122,7 +123,7 @@ async function createWhatsAppConnection(userId, ctx) {
                     } catch (e) {}
                 }
                 
-                await ctx.reply('✅ *WhatsApp berhasil terhubung!*\n\n📋 *Cara menggunakan:*\n1. Kirim link grup WhatsApp\n2. Bot akan menampilkan menu pengaturan grup\n\n💡 Gunakan /help untuk bantuan lebih lanjut', { parse_mode: 'Markdown' });
+                await ctx.reply('✅ *WhatsApp berhasil terhubung!*\n\n📋 *Cara menggunakan:*\n1. Kirim link grup WhatsApp (bisa beberapa link sekaligus)\n2. Bot akan menampilkan menu pengaturan grup\n\n💡 Gunakan /help untuk bantuan lebih lanjut', { parse_mode: 'Markdown' });
                 userStates.delete(userId);
             }
         });
@@ -177,6 +178,8 @@ Selamat datang! Bot ini memungkinkan Anda mengelola grup WhatsApp melalui Telegr
 /help - Bantuan lengkap
 
 💡 Mulai dengan /connect untuk menghubungkan WhatsApp Anda!
+
+🆕 *Fitur Batch:* Kirim beberapa link grup sekaligus untuk mengelola semua!
     `;
     
     await ctx.reply(welcomeMessage, { parse_mode: 'Markdown' });
@@ -259,6 +262,7 @@ bot.command('status', async (ctx) => {
 📞 Nomor: ${user?.id?.split('@')[0] || 'Unknown'}
 
 🔗 Kirim link grup WhatsApp untuk mengelola
+🆕 Bisa kirim beberapa link sekaligus!
     `;
     
     await ctx.reply(statusMessage, { parse_mode: 'Markdown' });
@@ -280,9 +284,11 @@ bot.command('help', async (ctx) => {
 
 📱 *Cara Mengelola Grup:*
 1. Pastikan WhatsApp terhubung (/connect)
-2. Kirim link grup WhatsApp (https://chat.whatsapp.com/xxx)
+2. Kirim link grup WhatsApp:
+   - Bisa 1 link: https://chat.whatsapp.com/xxx
+   - Bisa beberapa link sekaligus (pisah dengan enter)
 3. Bot akan menampilkan menu pengaturan grup
-4. Klik tombol untuk mengubah pengaturan
+4. Gunakan tombol batch untuk ubah semua grup sekaligus
 
 ⚙️ *Fitur Grup yang Bisa Dikelola:*
 • Edit Info Grup (ON/OFF)
@@ -290,6 +296,10 @@ bot.command('help', async (ctx) => {
 • Tambah Anggota (ON/OFF)
 • Pesan Sementara (ON/OFF)
 • Setujui Anggota (ON/OFF)
+
+🆕 *Fitur Batch:*
+• Aktifkan/Nonaktifkan semua fitur sekaligus
+• Otomatis skip grup yang sudah sesuai settingannya
 
 💡 *Tips:*
 - Pastikan Anda adalah admin di grup WhatsApp
@@ -313,33 +323,81 @@ bot.on('text', async (ctx) => {
     }
     
     // Check if it's a WhatsApp group link
-    const groupLinkRegex = /https:\/\/chat\.whatsapp\.com\/([A-Za-z0-9]+)/;
-    const match = text.match(groupLinkRegex);
+    const groupLinkRegex = /https:\/\/chat\.whatsapp\.com\/([A-Za-z0-9]+)/g;
+    const matches = [...text.matchAll(groupLinkRegex)];
     
-    if (!match) {
+    if (matches.length === 0) {
         return;
     }
     
-    const inviteCode = match[1];
+    // Process multiple links
+    const groups = [];
+    const errors = [];
     
+    const processingMsg = await ctx.reply(`🔄 *Memproses ${matches.length} grup...*`, { parse_mode: 'Markdown' });
+    
+    for (const match of matches) {
+        const inviteCode = match[1];
+        
+        try {
+            // Join group if not already joined
+            const groupId = await sock.groupAcceptInvite(inviteCode);
+            
+            // Get group metadata dan info lengkap
+            const groupFullInfo = await getGroupFullInfo(sock, groupId);
+            const groupMetadata = groupFullInfo.metadata;
+            
+            groups.push({
+                id: groupId,
+                name: groupMetadata.subject,
+                metadata: groupMetadata,
+                fullInfo: groupFullInfo
+            });
+            
+        } catch (error) {
+            console.error('Error processing group link:', error);
+            errors.push(inviteCode);
+        }
+    }
+    
+    // Delete processing message
     try {
-        // Join group if not already joined
-        const groupId = await sock.groupAcceptInvite(inviteCode);
-        
-        // Get group metadata dan info lengkap
-        const groupFullInfo = await getGroupFullInfo(sock, groupId);
-        const groupMetadata = groupFullInfo.metadata;
-        
-        // Get current settings dengan logic yang benar
-        const settings = {
-            editInfo: groupMetadata.restrict ? '❌ OFF' : '✅ ON',
-            sendMessage: groupMetadata.announce ? '❌ OFF' : '✅ ON',
-            addMember: groupMetadata.memberAddMode === false ? '✅ ON' : '❌ OFF',
-            ephemeral: groupFullInfo.ephemeral > 0 ? '✅ ON' : '❌ OFF',
-            approveMembers: groupMetadata.joinApprovalMode ? '✅ ON' : '❌ OFF'
-        };
-        
-        const message = `
+        await ctx.deleteMessage(processingMsg.message_id);
+    } catch (e) {}
+    
+    if (groups.length === 0) {
+        return ctx.reply('❌ *Gagal memproses semua link grup*\n\nPastikan link valid dan bot memiliki akses', { parse_mode: 'Markdown' });
+    }
+    
+    // Store groups for batch processing
+    const batchId = Date.now().toString();
+    batchGroups.set(batchId, groups);
+    
+    // Create management message
+    if (groups.length === 1) {
+        // Single group - show normal view
+        await showSingleGroupManagement(ctx, sock, groups[0]);
+    } else {
+        // Multiple groups - show batch view
+        await showBatchGroupManagement(ctx, sock, batchId, groups, errors);
+    }
+});
+
+// Show single group management
+async function showSingleGroupManagement(ctx, sock, group) {
+    const groupMetadata = group.metadata;
+    const groupFullInfo = group.fullInfo;
+    
+    // Get current settings dengan logic yang benar
+    const settings = {
+        editInfo: groupMetadata.restrict ? '❌ OFF' : '✅ ON',
+        sendMessage: groupMetadata.announce ? '❌ OFF' : '✅ ON',
+        addMember: groupMetadata.memberAddMode === false ? '✅ ON' : '❌ OFF',
+        ephemeral: groupFullInfo.ephemeral > 0 ? '✅ ON' : '❌ OFF',
+        approveMembers: groupMetadata.joinApprovalMode ? '✅ ON' : '❌ OFF'
+    };
+    
+    const message = `
 🎯 *Sedang mengelola grup:*
 _${groupMetadata.subject}_
 
@@ -348,27 +406,231 @@ _${groupMetadata.subject}_
 ${groupMetadata.desc ? `📝 *Deskripsi:* ${groupMetadata.desc}\n` : ''}
 
 ⚙️ *Pengaturan Grup Saat Ini:*
-        `;
+    `;
+    
+    const keyboard = [
+        [Markup.button.callback(`📝 Edit Info Grup: ${settings.editInfo}`, `toggle_edit_${group.id}`)],
+        [Markup.button.callback(`💬 Kirim Pesan: ${settings.sendMessage}`, `toggle_send_${group.id}`)],
+        [Markup.button.callback(`➕ Tambah Anggota: ${settings.addMember}`, `toggle_add_${group.id}`)],
+        [Markup.button.callback(`⏰ Pesan Sementara: ${settings.ephemeral}`, `toggle_ephemeral_${group.id}`)],
+        [Markup.button.callback(`✅ Setujui Anggota: ${settings.approveMembers}`, `toggle_approve_${group.id}`)],
+        [Markup.button.callback('🔄 Refresh', `refresh_${group.id}`)],
+        [Markup.button.callback('❌ Tutup', 'close_menu')]
+    ];
+    
+    await ctx.reply(message, {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard(keyboard)
+    });
+}
+
+// Show batch group management
+async function showBatchGroupManagement(ctx, sock, batchId, groups, errors) {
+    // Calculate summary statistics
+    let stats = {
+        editInfo: { on: 0, off: 0 },
+        sendMessage: { on: 0, off: 0 },
+        addMember: { on: 0, off: 0 },
+        ephemeral: { on: 0, off: 0 },
+        approveMembers: { on: 0, off: 0 }
+    };
+    
+    groups.forEach(group => {
+        const metadata = group.metadata;
+        const fullInfo = group.fullInfo;
         
-        const keyboard = [
-            [Markup.button.callback(`📝 Edit Info Grup: ${settings.editInfo}`, `toggle_edit_${groupId}`)],
-            [Markup.button.callback(`💬 Kirim Pesan: ${settings.sendMessage}`, `toggle_send_${groupId}`)],
-            [Markup.button.callback(`➕ Tambah Anggota: ${settings.addMember}`, `toggle_add_${groupId}`)],
-            [Markup.button.callback(`⏰ Pesan Sementara: ${settings.ephemeral}`, `toggle_ephemeral_${groupId}`)],
-            [Markup.button.callback(`✅ Setujui Anggota: ${settings.approveMembers}`, `toggle_approve_${groupId}`)],
-            [Markup.button.callback('🔄 Refresh', `refresh_${groupId}`)],
-            [Markup.button.callback('❌ Tutup', 'close_menu')]
-        ];
+        // Edit Info
+        if (metadata.restrict) stats.editInfo.off++;
+        else stats.editInfo.on++;
         
-        await ctx.reply(message, {
-            parse_mode: 'Markdown',
-            ...Markup.inlineKeyboard(keyboard)
-        });
+        // Send Message
+        if (metadata.announce) stats.sendMessage.off++;
+        else stats.sendMessage.on++;
         
-    } catch (error) {
-        console.error('Error processing group link:', error);
-        await ctx.reply('❌ *Gagal memproses link grup*\n\nPastikan link valid dan bot memiliki akses', { parse_mode: 'Markdown' });
+        // Add Member
+        if (metadata.memberAddMode === false) stats.addMember.on++;
+        else stats.addMember.off++;
+        
+        // Ephemeral
+        if (fullInfo.ephemeral > 0) stats.ephemeral.on++;
+        else stats.ephemeral.off++;
+        
+        // Approve Members
+        if (metadata.joinApprovalMode) stats.approveMembers.on++;
+        else stats.approveMembers.off++;
+    });
+    
+    let message = `🎯 *Mengelola ${groups.length} Grup WhatsApp*\n\n`;
+    
+    // Show groups list
+    groups.forEach((group, index) => {
+        message += `${index + 1}. *${group.name}* (${group.metadata.participants.length} anggota)\n`;
+    });
+    
+    if (errors.length > 0) {
+        message += `\n⚠️ *${errors.length} link gagal diproses*\n`;
     }
+    
+    message += `\n📊 *Statistik Pengaturan:*\n`;
+    message += `📝 Edit Info: ${stats.editInfo.on} ON, ${stats.editInfo.off} OFF\n`;
+    message += `💬 Kirim Pesan: ${stats.sendMessage.on} ON, ${stats.sendMessage.off} OFF\n`;
+    message += `➕ Tambah Anggota: ${stats.addMember.on} ON, ${stats.addMember.off} OFF\n`;
+    message += `⏰ Pesan Sementara: ${stats.ephemeral.on} ON, ${stats.ephemeral.off} OFF\n`;
+    message += `✅ Setujui Anggota: ${stats.approveMembers.on} ON, ${stats.approveMembers.off} OFF\n`;
+    
+    message += `\n💡 *Gunakan tombol di bawah untuk mengubah semua grup sekaligus*`;
+    message += `\n_Bot akan skip grup yang sudah sesuai settingannya_`;
+    
+    const keyboard = [
+        [
+            Markup.button.callback('📝 Edit Info ON Semua', `batch_edit_on_${batchId}`),
+            Markup.button.callback('📝 Edit Info OFF Semua', `batch_edit_off_${batchId}`)
+        ],
+        [
+            Markup.button.callback('💬 Kirim Pesan ON Semua', `batch_send_on_${batchId}`),
+            Markup.button.callback('💬 Kirim Pesan OFF Semua', `batch_send_off_${batchId}`)
+        ],
+        [
+            Markup.button.callback('➕ Tambah Anggota ON Semua', `batch_add_on_${batchId}`),
+            Markup.button.callback('➕ Tambah Anggota OFF Semua', `batch_add_off_${batchId}`)
+        ],
+        [
+            Markup.button.callback('⏰ Pesan Sementara ON Semua', `batch_ephemeral_on_${batchId}`),
+            Markup.button.callback('⏰ Pesan Sementara OFF Semua', `batch_ephemeral_off_${batchId}`)
+        ],
+        [
+            Markup.button.callback('✅ Setujui Anggota ON Semua', `batch_approve_on_${batchId}`),
+            Markup.button.callback('✅ Setujui Anggota OFF Semua', `batch_approve_off_${batchId}`)
+        ],
+        [Markup.button.callback('🔄 Refresh', `refresh_batch_${batchId}`)],
+        [Markup.button.callback('❌ Tutup', 'close_menu')]
+    ];
+    
+    await ctx.reply(message, {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard(keyboard)
+    });
+}
+
+// Batch handlers
+bot.action(/batch_edit_(on|off)_(.+)/, async (ctx) => {
+    const action = ctx.match[1];
+    const batchId = ctx.match[2];
+    const userId = ctx.from.id;
+    const sock = waConnections.get(userId);
+    
+    if (!sock) return ctx.answerCbQuery('WhatsApp tidak terhubung!');
+    
+    const groups = batchGroups.get(batchId);
+    if (!groups) return ctx.answerCbQuery('Sesi expired, kirim link grup lagi');
+    
+    await ctx.answerCbQuery('🔄 Memproses...');
+    
+    let processed = 0;
+    let skipped = 0;
+    
+    for (const group of groups) {
+        try {
+            const metadata = await sock.groupMetadata(group.id);
+            const currentRestrict = metadata.restrict;
+            const targetRestrict = action === 'off';
+            
+            if (currentRestrict !== targetRestrict) {
+                await sock.groupSettingUpdate(group.id, targetRestrict ? 'locked' : 'unlocked');
+                processed++;
+            } else {
+                skipped++;
+            }
+        } catch (error) {
+            console.error('Error batch edit:', error);
+        }
+    }
+    
+    // Refresh data
+    for (let i = 0; i < groups.length; i++) {
+        try {
+            const groupFullInfo = await getGroupFullInfo(sock, groups[i].id);
+            groups[i].metadata = groupFullInfo.metadata;
+            groups[i].fullInfo = groupFullInfo;
+        } catch (error) {}
+    }
+    
+    await showBatchGroupManagement(ctx, sock, batchId, groups, []);
+    await ctx.answerCbQuery(`✅ Diproses: ${processed}, Skip: ${skipped}`, { show_alert: true });
+});
+
+bot.action(/batch_approve_(on|off)_(.+)/, async (ctx) => {
+    const action = ctx.match[1];
+    const batchId = ctx.match[2];
+    const userId = ctx.from.id;
+    const sock = waConnections.get(userId);
+    
+    if (!sock) return ctx.answerCbQuery('WhatsApp tidak terhubung!');
+    
+    const groups = batchGroups.get(batchId);
+    if (!groups) return ctx.answerCbQuery('Sesi expired, kirim link grup lagi');
+    
+    await ctx.answerCbQuery('🔄 Memproses...');
+    
+    let processed = 0;
+    let skipped = 0;
+    
+    for (const group of groups) {
+        try {
+            const metadata = await sock.groupMetadata(group.id);
+            const currentApprove = metadata.joinApprovalMode;
+            const targetApprove = action === 'on';
+            
+            if (currentApprove !== targetApprove) {
+                const mode = targetApprove ? 'on' : 'off';
+                await sock.groupJoinApprovalMode(group.id, mode);
+                processed++;
+            } else {
+                skipped++;
+            }
+        } catch (error) {
+            console.error('Error batch approve:', error);
+        }
+    }
+    
+    // Refresh data
+    for (let i = 0; i < groups.length; i++) {
+        try {
+            const groupFullInfo = await getGroupFullInfo(sock, groups[i].id);
+            groups[i].metadata = groupFullInfo.metadata;
+            groups[i].fullInfo = groupFullInfo;
+        } catch (error) {}
+    }
+    
+    await showBatchGroupManagement(ctx, sock, batchId, groups, []);
+    await ctx.answerCbQuery(`✅ Diproses: ${processed}, Skip: ${skipped}`, { show_alert: true });
+});
+
+// Refresh batch
+bot.action(/refresh_batch_(.+)/, async (ctx) => {
+    const batchId = ctx.match[1];
+    const userId = ctx.from.id;
+    const sock = waConnections.get(userId);
+    
+    if (!sock) return ctx.answerCbQuery('WhatsApp tidak terhubung!');
+    
+    const groups = batchGroups.get(batchId);
+    if (!groups) return ctx.answerCbQuery('Sesi expired, kirim link grup lagi');
+    
+    await ctx.answerCbQuery('🔄 Memperbarui...');
+    
+    // Refresh all groups data
+    for (let i = 0; i < groups.length; i++) {
+        try {
+            const groupFullInfo = await getGroupFullInfo(sock, groups[i].id);
+            groups[i].metadata = groupFullInfo.metadata;
+            groups[i].fullInfo = groupFullInfo;
+        } catch (error) {
+            console.error('Error refreshing group:', error);
+        }
+    }
+    
+    await showBatchGroupManagement(ctx, sock, batchId, groups, []);
 });
 
 // Callback query handlers
@@ -415,6 +677,7 @@ bot.action('confirm_logout', async (ctx) => {
     // Hapus semua state
     userStates.delete(userId);
     connectionStates.delete(userId);
+    batchGroups.clear();
     
     await ctx.editMessageText('✅ *Berhasil logout dari WhatsApp*\n\nSesi telah dihapus', { parse_mode: 'Markdown' });
 });
@@ -428,7 +691,7 @@ bot.action('close_menu', async (ctx) => {
     await ctx.answerCbQuery('Menu ditutup');
 });
 
-// Toggle handlers
+// Toggle handlers for single group
 bot.action(/toggle_edit_(.+)/, async (ctx) => {
     const groupId = ctx.match[1];
     const userId = ctx.from.id;
@@ -483,12 +746,15 @@ bot.action(/toggle_add_(.+)/, async (ctx) => {
     try {
         await ctx.answerCbQuery('🔄 Mengubah pengaturan...');
         
-        // Toggle member add setting
+        // Get fresh metadata
         const groupMetadata = await sock.groupMetadata(groupId);
-        const currentSetting = groupMetadata.memberAddMode === false;
         
-        // Gunakan groupSettingUpdate dengan 'member_add_mode'
-        await sock.groupSettingUpdate(groupId, currentSetting ? 'member_add_admin_only' : 'member_add_all');
+        // Toggle member add setting - Fixed logic
+        // memberAddMode: false = all can add, true = only admin can add
+        const currentAllCanAdd = groupMetadata.memberAddMode === false;
+        const newSetting = currentAllCanAdd ? 'add_mode_admin' : 'add_mode_all';
+        
+        await sock.groupSettingUpdate(groupId, newSetting);
         
         // Update message
         await updateGroupMessage(ctx, sock, groupId);
@@ -536,8 +802,8 @@ bot.action(/toggle_approve_(.+)/, async (ctx) => {
         const groupMetadata = await sock.groupMetadata(groupId);
         const mode = groupMetadata.joinApprovalMode ? 'off' : 'on';
         
-        // Gunakan groupSettingUpdate untuk join approval
-        await sock.groupSettingUpdate(groupId, mode === 'on' ? 'approval_mode_on' : 'approval_mode_off');
+        // Update join approval mode
+        await sock.groupJoinApprovalMode(groupId, mode);
         
         // Update message
         await updateGroupMessage(ctx, sock, groupId);
