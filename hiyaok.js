@@ -172,20 +172,10 @@ async function getGroupFullInfo(sock, groupId) {
             ephemeralSetting = metadata.ephemeralDuration;
         }
         
-        // Check if bot is admin (fix for admin detection)
-        const botId = sock.user.id;
-        const botParticipant = metadata.participants.find(p => 
-            p.id === botId || 
-            p.id === botId.replace('@c.us', '@s.whatsapp.net') ||
-            p.id === botId.split('@')[0] + '@s.whatsapp.net'
-        );
-        const isBotAdmin = botParticipant?.admin === 'admin' || botParticipant?.admin === 'superadmin';
-        
         return {
             metadata,
             inviteCode: groupInfo,
-            ephemeral: ephemeralSetting,
-            isBotAdmin
+            ephemeral: ephemeralSetting
         };
     } catch (error) {
         console.error('Error getting group info:', error);
@@ -390,8 +380,7 @@ bot.on('text', async (ctx) => {
                 id: groupId,
                 name: groupMetadata.subject,
                 metadata: groupMetadata,
-                fullInfo: groupFullInfo,
-                isBotAdmin: groupFullInfo.isBotAdmin
+                fullInfo: groupFullInfo
             });
             
         } catch (error) {
@@ -432,18 +421,12 @@ async function showBatchGroupManagement(ctx, sock, batchId, groups, errors) {
         editInfo: { on: 0, off: 0 },
         sendMessage: { on: 0, off: 0 },
         ephemeral: { on: 0, off: 0 },
-        approveMembers: { on: 0, off: 0 },
-        adminCount: 0,
-        nonAdminCount: 0
+        approveMembers: { on: 0, off: 0 }
     };
     
     groups.forEach(group => {
         const metadata = group.metadata;
         const fullInfo = group.fullInfo;
-        
-        // Admin status
-        if (group.isBotAdmin) stats.adminCount++;
-        else stats.nonAdminCount++;
         
         // Edit Info
         if (metadata.restrict) stats.editInfo.off++;
@@ -464,19 +447,11 @@ async function showBatchGroupManagement(ctx, sock, batchId, groups, errors) {
     
     let message = `🎯 *Mengelola ${groups.length} Grup WhatsApp*\n\n`;
     
-    // Show groups list
-    groups.forEach((group, index) => {
-        const adminStatus = group.isBotAdmin ? '✅' : '❌';
-        message += `${index + 1}. ${adminStatus} *${group.name}* (${group.metadata.participants.length} anggota)\n`;
-    });
-    
     if (errors.length > 0) {
-        message += `\n⚠️ *${errors.length} link gagal diproses*\n`;
+        message += `⚠️ *${errors.length} link gagal diproses*\n\n`;
     }
     
-    message += `\n📊 *Status Bot:*\n`;
-    message += `👑 Admin: ${stats.adminCount} grup | ❌ Bukan Admin: ${stats.nonAdminCount} grup\n`;
-    message += `\n📊 *Statistik Pengaturan:*\n`;
+    message += `📊 *Statistik Pengaturan:*\n`;
     message += `📝 Edit Info: ${stats.editInfo.on} ON, ${stats.editInfo.off} OFF\n`;
     message += `💬 Kirim Pesan: ${stats.sendMessage.on} ON, ${stats.sendMessage.off} OFF\n`;
     message += `⏰ Pesan Sementara: ${stats.ephemeral.on} ON, ${stats.ephemeral.off} OFF\n`;
@@ -514,7 +489,7 @@ async function safeAnswerCbQuery(ctx, text, showAlert = false) {
     }
 }
 
-// Batch toggle handlers with improved error handling
+// Batch toggle handlers
 bot.action(/batch_toggle_edit_(.+)/, async (ctx) => {
     const batchId = ctx.match[1];
     const userId = ctx.from.id;
@@ -543,12 +518,6 @@ bot.action(/batch_toggle_edit_(.+)/, async (ctx) => {
     const failedGroups = [];
     
     for (const group of groups) {
-        if (!group.isBotAdmin) {
-            failed++;
-            failedGroups.push({ name: group.name, reason: 'Bot bukan admin' });
-            continue;
-        }
-        
         try {
             await retryOperation(async () => {
                 await sock.groupSettingUpdate(group.id, targetRestrict ? 'locked' : 'unlocked');
@@ -571,7 +540,6 @@ bot.action(/batch_toggle_edit_(.+)/, async (ctx) => {
             const groupFullInfo = await getGroupFullInfo(sock, groups[i].id);
             groups[i].metadata = groupFullInfo.metadata;
             groups[i].fullInfo = groupFullInfo;
-            groups[i].isBotAdmin = groupFullInfo.isBotAdmin;
         } catch (error) {
             console.error(`Failed to refresh group ${groups[i].name}:`, error);
         }
@@ -624,12 +592,6 @@ bot.action(/batch_toggle_send_(.+)/, async (ctx) => {
     const failedGroups = [];
     
     for (const group of groups) {
-        if (!group.isBotAdmin) {
-            failed++;
-            failedGroups.push({ name: group.name, reason: 'Bot bukan admin' });
-            continue;
-        }
-        
         try {
             await retryOperation(async () => {
                 await sock.groupSettingUpdate(group.id, targetAnnounce ? 'announcement' : 'not_announcement');
@@ -652,7 +614,6 @@ bot.action(/batch_toggle_send_(.+)/, async (ctx) => {
             const groupFullInfo = await getGroupFullInfo(sock, groups[i].id);
             groups[i].metadata = groupFullInfo.metadata;
             groups[i].fullInfo = groupFullInfo;
-            groups[i].isBotAdmin = groupFullInfo.isBotAdmin;
         } catch (error) {
             console.error(`Failed to refresh group ${groups[i].name}:`, error);
         }
@@ -704,12 +665,6 @@ bot.action(/batch_toggle_ephemeral_(.+)/, async (ctx) => {
     const failedGroups = [];
     
     for (const group of groups) {
-        if (!group.isBotAdmin) {
-            failed++;
-            failedGroups.push({ name: group.name, reason: 'Bot bukan admin' });
-            continue;
-        }
-        
         try {
             await retryOperation(async () => {
                 const newDuration = targetEphemeral ? 86400 : 0; // 24 hours or off
@@ -733,7 +688,6 @@ bot.action(/batch_toggle_ephemeral_(.+)/, async (ctx) => {
             const groupFullInfo = await getGroupFullInfo(sock, groups[i].id);
             groups[i].metadata = groupFullInfo.metadata;
             groups[i].fullInfo = groupFullInfo;
-            groups[i].isBotAdmin = groupFullInfo.isBotAdmin;
         } catch (error) {
             console.error(`Failed to refresh group ${groups[i].name}:`, error);
         }
@@ -785,12 +739,6 @@ bot.action(/batch_toggle_approve_(.+)/, async (ctx) => {
     const failedGroups = [];
     
     for (const group of groups) {
-        if (!group.isBotAdmin) {
-            failed++;
-            failedGroups.push({ name: group.name, reason: 'Bot bukan admin' });
-            continue;
-        }
-        
         try {
             await retryOperation(async () => {
                 const mode = targetApprove ? 'on' : 'off';
@@ -814,7 +762,6 @@ bot.action(/batch_toggle_approve_(.+)/, async (ctx) => {
             const groupFullInfo = await getGroupFullInfo(sock, groups[i].id);
             groups[i].metadata = groupFullInfo.metadata;
             groups[i].fullInfo = groupFullInfo;
-            groups[i].isBotAdmin = groupFullInfo.isBotAdmin;
         } catch (error) {
             console.error(`Failed to refresh group ${groups[i].name}:`, error);
         }
@@ -857,7 +804,6 @@ bot.action(/refresh_batch_(.+)/, async (ctx) => {
             const groupFullInfo = await getGroupFullInfo(sock, groups[i].id);
             groups[i].metadata = groupFullInfo.metadata;
             groups[i].fullInfo = groupFullInfo;
-            groups[i].isBotAdmin = groupFullInfo.isBotAdmin;
         } catch (error) {
             console.error('Error refreshing group:', error);
         }
@@ -873,18 +819,12 @@ async function updateBatchMessage(ctx, sock, batchId, groups) {
         editInfo: { on: 0, off: 0 },
         sendMessage: { on: 0, off: 0 },
         ephemeral: { on: 0, off: 0 },
-        approveMembers: { on: 0, off: 0 },
-        adminCount: 0,
-        nonAdminCount: 0
+        approveMembers: { on: 0, off: 0 }
     };
     
     groups.forEach(group => {
         const metadata = group.metadata;
         const fullInfo = group.fullInfo;
-        
-        // Admin status
-        if (group.isBotAdmin) stats.adminCount++;
-        else stats.nonAdminCount++;
         
         // Edit Info
         if (metadata.restrict) stats.editInfo.off++;
@@ -904,16 +844,7 @@ async function updateBatchMessage(ctx, sock, batchId, groups) {
     });
     
     let message = `🎯 *Mengelola ${groups.length} Grup WhatsApp*\n\n`;
-    
-    // Show groups list
-    groups.forEach((group, index) => {
-        const adminStatus = group.isBotAdmin ? '✅' : '❌';
-        message += `${index + 1}. ${adminStatus} *${group.name}* (${group.metadata.participants.length} anggota)\n`;
-    });
-    
-    message += `\n📊 *Status Bot:*\n`;
-    message += `👑 Admin: ${stats.adminCount} grup | ❌ Bukan Admin: ${stats.nonAdminCount} grup\n`;
-    message += `\n📊 *Statistik Pengaturan:*\n`;
+    message += `📊 *Statistik Pengaturan:*\n`;
     message += `📝 Edit Info: ${stats.editInfo.on} ON, ${stats.editInfo.off} OFF\n`;
     message += `💬 Kirim Pesan: ${stats.sendMessage.on} ON, ${stats.sendMessage.off} OFF\n`;
     message += `⏰ Pesan Sementara: ${stats.ephemeral.on} ON, ${stats.ephemeral.off} OFF\n`;
