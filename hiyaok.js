@@ -15,7 +15,7 @@ const bot = new Telegraf(BOT_TOKEN);
 global.crypto = crypto;
 
 // Admin Bot (ganti dengan ID Telegram admin)
-const ADMIN_IDS = [5988451717]; // Isi dengan user ID admin
+const ADMIN_IDS = [6903821235]; // Isi dengan user ID admin
 
 // Menyimpan koneksi WhatsApp per user
 const waConnections = new Map();
