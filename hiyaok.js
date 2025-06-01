@@ -1,5 +1,4 @@
 //
-//
 const { Telegraf, Markup } = require('telegraf');
 const { makeWASocket, DisconnectReason, useMultiFileAuthState, getAggregateVotesInPollMessage } = require('@whiskeysockets/baileys');
 const QRCode = require('qrcode');
@@ -23,11 +22,34 @@ const userStates = new Map();
 const connectionStates = new Map();
 const batchGroups = new Map(); // Menyimpan grup-grup untuk batch processing
 
+// Delay untuk menghindari rate limit
+const DELAY_BETWEEN_OPERATIONS = 1000; // 1 detik
+const MAX_RETRIES = 3; // Maksimal retry untuk operasi gagal
+
 // Middleware untuk cek admin
 const isAdmin = (ctx) => {
     const userId = ctx.from?.id;
     return ADMIN_IDS.includes(userId);
 };
+
+// Helper function untuk delay
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Helper function untuk retry operation
+async function retryOperation(operation, maxRetries = MAX_RETRIES, delayMs = 2000) {
+    for (let i = 0; i < maxRetries; i++) {
+        try {
+            return await operation();
+        } catch (error) {
+            console.error(`Attempt ${i + 1} failed:`, error.message);
+            if (i < maxRetries - 1) {
+                await delay(delayMs * (i + 1)); // Incremental delay
+            } else {
+                throw error;
+            }
+        }
+    }
+}
 
 // Fungsi untuk membuat koneksi WhatsApp
 async function createWhatsAppConnection(userId, ctx) {
@@ -304,7 +326,6 @@ bot.command('help', async (ctx) => {
 ⚙️ *Fitur Grup yang Bisa Dikelola:*
 • Edit Info Grup (ON/OFF)
 • Kirim Pesan (ON/OFF)  
-• Tambah Anggota (ON/OFF)
 • Pesan Sementara (ON/OFF)
 • Setujui Anggota (ON/OFF)
 
@@ -358,7 +379,7 @@ bot.on('text', async (ctx) => {
                 // Join group if not already joined
                 groupId = await sock.groupAcceptInvite(inviteCode);
                 // Wait a bit after joining
-                await new Promise(resolve => setTimeout(resolve, 1000));
+                await delay(2000);
             }
             
             // Get fresh group metadata
@@ -410,7 +431,6 @@ async function showBatchGroupManagement(ctx, sock, batchId, groups, errors) {
     let stats = {
         editInfo: { on: 0, off: 0 },
         sendMessage: { on: 0, off: 0 },
-        addMember: { on: 0, off: 0 },
         ephemeral: { on: 0, off: 0 },
         approveMembers: { on: 0, off: 0 },
         adminCount: 0,
@@ -433,13 +453,6 @@ async function showBatchGroupManagement(ctx, sock, batchId, groups, errors) {
         if (metadata.announce) stats.sendMessage.off++;
         else stats.sendMessage.on++;
         
-        // Add Member - Updated logic
-        if (metadata.memberAddMode === 'admin_add') {
-            stats.addMember.off++;
-        } else {
-            stats.addMember.on++;
-        }
-        
         // Ephemeral
         if (fullInfo.ephemeral > 0) stats.ephemeral.on++;
         else stats.ephemeral.off++;
@@ -449,7 +462,6 @@ async function showBatchGroupManagement(ctx, sock, batchId, groups, errors) {
         else stats.approveMembers.off++;
     });
     
-    // Rest of the function remains the same...
     let message = `🎯 *Mengelola ${groups.length} Grup WhatsApp*\n\n`;
     
     // Show groups list
@@ -463,10 +475,10 @@ async function showBatchGroupManagement(ctx, sock, batchId, groups, errors) {
     }
     
     message += `\n📊 *Status Bot:*\n`;
+    message += `👑 Admin: ${stats.adminCount} grup | ❌ Bukan Admin: ${stats.nonAdminCount} grup\n`;
     message += `\n📊 *Statistik Pengaturan:*\n`;
     message += `📝 Edit Info: ${stats.editInfo.on} ON, ${stats.editInfo.off} OFF\n`;
     message += `💬 Kirim Pesan: ${stats.sendMessage.on} ON, ${stats.sendMessage.off} OFF\n`;
-    message += `➕ Tambah Anggota: ${stats.addMember.on} ON, ${stats.addMember.off} OFF\n`;
     message += `⏰ Pesan Sementara: ${stats.ephemeral.on} ON, ${stats.ephemeral.off} OFF\n`;
     message += `✅ Setujui Anggota: ${stats.approveMembers.on} ON, ${stats.approveMembers.off} OFF\n`;
     
@@ -475,14 +487,12 @@ async function showBatchGroupManagement(ctx, sock, batchId, groups, errors) {
     // Determine button states based on majority
     const editInfoState = stats.editInfo.on > stats.editInfo.off ? '✅ ON' : '❌ OFF';
     const sendMessageState = stats.sendMessage.on > stats.sendMessage.off ? '✅ ON' : '❌ OFF';
-    const addMemberState = stats.addMember.on > stats.addMember.off ? '✅ ON' : '❌ OFF';
     const ephemeralState = stats.ephemeral.on > stats.ephemeral.off ? '✅ ON' : '❌ OFF';
     const approveMembersState = stats.approveMembers.on > stats.approveMembers.off ? '✅ ON' : '❌ OFF';
     
     const keyboard = [
         [Markup.button.callback(`📝 Edit Info Grup: ${editInfoState}`, `batch_toggle_edit_${batchId}`)],
         [Markup.button.callback(`💬 Kirim Pesan: ${sendMessageState}`, `batch_toggle_send_${batchId}`)],
-        [Markup.button.callback(`➕ Tambah Anggota: ${addMemberState}`, `batch_toggle_add_${batchId}`)],
         [Markup.button.callback(`⏰ Pesan Sementara: ${ephemeralState}`, `batch_toggle_ephemeral_${batchId}`)],
         [Markup.button.callback(`✅ Setujui Anggota: ${approveMembersState}`, `batch_toggle_approve_${batchId}`)],
         [Markup.button.callback('🔄 Refresh', `refresh_batch_${batchId}`)],
@@ -504,7 +514,7 @@ async function safeAnswerCbQuery(ctx, text, showAlert = false) {
     }
 }
 
-// Batch toggle handlers
+// Batch toggle handlers with improved error handling
 bot.action(/batch_toggle_edit_(.+)/, async (ctx) => {
     const batchId = ctx.match[1];
     const userId = ctx.from.id;
@@ -517,6 +527,9 @@ bot.action(/batch_toggle_edit_(.+)/, async (ctx) => {
     
     await safeAnswerCbQuery(ctx, '🔄 Memproses...');
     
+    // Update message to show progress
+    await ctx.editMessageText('🔄 *Sedang memproses pengaturan Edit Info...*\n\n_Mohon tunggu, ini mungkin memakan waktu beberapa saat_', { parse_mode: 'Markdown' });
+    
     // Determine target state (if most are ON, turn OFF, else turn ON)
     let onCount = 0, offCount = 0;
     groups.forEach(group => {
@@ -527,16 +540,29 @@ bot.action(/batch_toggle_edit_(.+)/, async (ctx) => {
     
     let processed = 0;
     let failed = 0;
+    const failedGroups = [];
     
     for (const group of groups) {
-        try {
-            await sock.groupSettingUpdate(group.id, targetRestrict ? 'locked' : 'unlocked');
-            processed++;
-            await new Promise(resolve => setTimeout(resolve, 300));
-        } catch (error) {
-            console.error('Error batch edit:', error);
+        if (!group.isBotAdmin) {
             failed++;
+            failedGroups.push({ name: group.name, reason: 'Bot bukan admin' });
+            continue;
         }
+        
+        try {
+            await retryOperation(async () => {
+                await sock.groupSettingUpdate(group.id, targetRestrict ? 'locked' : 'unlocked');
+            });
+            processed++;
+            console.log(`✅ Edit Info updated for: ${group.name}`);
+        } catch (error) {
+            console.error(`❌ Failed to update Edit Info for ${group.name}:`, error);
+            failed++;
+            failedGroups.push({ name: group.name, reason: error.message });
+        }
+        
+        // Delay between operations
+        await delay(DELAY_BETWEEN_OPERATIONS);
     }
     
     // Refresh data
@@ -546,10 +572,27 @@ bot.action(/batch_toggle_edit_(.+)/, async (ctx) => {
             groups[i].metadata = groupFullInfo.metadata;
             groups[i].fullInfo = groupFullInfo;
             groups[i].isBotAdmin = groupFullInfo.isBotAdmin;
-        } catch (error) {}
+        } catch (error) {
+            console.error(`Failed to refresh group ${groups[i].name}:`, error);
+        }
     }
     
-    // Update message instead of sending new one
+    // Show result summary
+    let resultMsg = `✅ *Edit Info Grup Diperbarui*\n\n`;
+    resultMsg += `📊 *Hasil:*\n`;
+    resultMsg += `✅ Berhasil: ${processed} grup\n`;
+    resultMsg += `❌ Gagal: ${failed} grup\n`;
+    
+    if (failedGroups.length > 0) {
+        resultMsg += `\n*Detail Gagal:*\n`;
+        failedGroups.forEach((fg, idx) => {
+            resultMsg += `${idx + 1}. ${fg.name} - ${fg.reason}\n`;
+        });
+    }
+    
+    await ctx.reply(resultMsg, { parse_mode: 'Markdown' });
+    
+    // Update message
     await updateBatchMessage(ctx, sock, batchId, groups);
 });
 
@@ -565,6 +608,9 @@ bot.action(/batch_toggle_send_(.+)/, async (ctx) => {
     
     await safeAnswerCbQuery(ctx, '🔄 Memproses...');
     
+    // Update message to show progress
+    await ctx.editMessageText('🔄 *Sedang memproses pengaturan Kirim Pesan...*\n\n_Mohon tunggu, ini mungkin memakan waktu beberapa saat_', { parse_mode: 'Markdown' });
+    
     // Determine target state
     let onCount = 0, offCount = 0;
     groups.forEach(group => {
@@ -575,68 +621,29 @@ bot.action(/batch_toggle_send_(.+)/, async (ctx) => {
     
     let processed = 0;
     let failed = 0;
+    const failedGroups = [];
     
     for (const group of groups) {
-        try {
-            await sock.groupSettingUpdate(group.id, targetAnnounce ? 'announcement' : 'not_announcement');
-            processed++;
-            await new Promise(resolve => setTimeout(resolve, 300));
-        } catch (error) {
-            console.error('Error batch send:', error);
+        if (!group.isBotAdmin) {
             failed++;
+            failedGroups.push({ name: group.name, reason: 'Bot bukan admin' });
+            continue;
         }
-    }
-    
-    // Refresh data
-    for (let i = 0; i < groups.length; i++) {
+        
         try {
-            const groupFullInfo = await getGroupFullInfo(sock, groups[i].id);
-            groups[i].metadata = groupFullInfo.metadata;
-            groups[i].fullInfo = groupFullInfo;
-            groups[i].isBotAdmin = groupFullInfo.isBotAdmin;
-        } catch (error) {}
-    }
-    
-    await updateBatchMessage(ctx, sock, batchId, groups);
-});
-
-bot.action(/batch_toggle_add_(.+)/, async (ctx) => {
-    const batchId = ctx.match[1];
-    const userId = ctx.from.id;
-    const sock = waConnections.get(userId);
-    
-    if (!sock) return safeAnswerCbQuery(ctx, 'WhatsApp tidak terhubung!');
-    
-    const groups = batchGroups.get(batchId);
-    if (!groups) return safeAnswerCbQuery(ctx, 'Sesi expired, kirim link grup lagi');
-    
-    await safeAnswerCbQuery(ctx, '🔄 Memproses...');
-    
-    // Determine target state
-    let onCount = 0, offCount = 0;
-    groups.forEach(group => {
-        if (group.metadata.memberAddMode === 'admin_add') {
-            offCount++;
-        } else {
-            onCount++;
-        }
-    });
-    const targetAllCanAdd = offCount >= onCount;
-    
-    let processed = 0;
-    let failed = 0;
-    
-    for (const group of groups) {
-        try {
-            await sock.groupUpdateSettings(group.id, {
-                memberAddMode: targetAllCanAdd ? 'all_add' : 'admin_add'
+            await retryOperation(async () => {
+                await sock.groupSettingUpdate(group.id, targetAnnounce ? 'announcement' : 'not_announcement');
             });
             processed++;
-            await new Promise(resolve => setTimeout(resolve, 300));
+            console.log(`✅ Send Message updated for: ${group.name}`);
         } catch (error) {
-            console.error('Error batch add:', error);
+            console.error(`❌ Failed to update Send Message for ${group.name}:`, error);
             failed++;
+            failedGroups.push({ name: group.name, reason: error.message });
         }
+        
+        // Delay between operations
+        await delay(DELAY_BETWEEN_OPERATIONS);
     }
     
     // Refresh data
@@ -646,8 +653,25 @@ bot.action(/batch_toggle_add_(.+)/, async (ctx) => {
             groups[i].metadata = groupFullInfo.metadata;
             groups[i].fullInfo = groupFullInfo;
             groups[i].isBotAdmin = groupFullInfo.isBotAdmin;
-        } catch (error) {}
+        } catch (error) {
+            console.error(`Failed to refresh group ${groups[i].name}:`, error);
+        }
     }
+    
+    // Show result summary
+    let resultMsg = `✅ *Kirim Pesan Diperbarui*\n\n`;
+    resultMsg += `📊 *Hasil:*\n`;
+    resultMsg += `✅ Berhasil: ${processed} grup\n`;
+    resultMsg += `❌ Gagal: ${failed} grup\n`;
+    
+    if (failedGroups.length > 0) {
+        resultMsg += `\n*Detail Gagal:*\n`;
+        failedGroups.forEach((fg, idx) => {
+            resultMsg += `${idx + 1}. ${fg.name} - ${fg.reason}\n`;
+        });
+    }
+    
+    await ctx.reply(resultMsg, { parse_mode: 'Markdown' });
     
     await updateBatchMessage(ctx, sock, batchId, groups);
 });
@@ -664,6 +688,9 @@ bot.action(/batch_toggle_ephemeral_(.+)/, async (ctx) => {
     
     await safeAnswerCbQuery(ctx, '🔄 Memproses...');
     
+    // Update message to show progress
+    await ctx.editMessageText('🔄 *Sedang memproses pengaturan Pesan Sementara...*\n\n_Mohon tunggu, ini mungkin memakan waktu beberapa saat_', { parse_mode: 'Markdown' });
+    
     // Determine target state
     let onCount = 0, offCount = 0;
     groups.forEach(group => {
@@ -674,17 +701,30 @@ bot.action(/batch_toggle_ephemeral_(.+)/, async (ctx) => {
     
     let processed = 0;
     let failed = 0;
+    const failedGroups = [];
     
     for (const group of groups) {
-        try {
-            const newDuration = targetEphemeral ? 86400 : 0;
-            await sock.groupToggleEphemeral(group.id, newDuration);
-            processed++;
-            await new Promise(resolve => setTimeout(resolve, 300));
-        } catch (error) {
-            console.error('Error batch ephemeral:', error);
+        if (!group.isBotAdmin) {
             failed++;
+            failedGroups.push({ name: group.name, reason: 'Bot bukan admin' });
+            continue;
         }
+        
+        try {
+            await retryOperation(async () => {
+                const newDuration = targetEphemeral ? 86400 : 0; // 24 hours or off
+                await sock.groupToggleEphemeral(group.id, newDuration);
+            });
+            processed++;
+            console.log(`✅ Ephemeral updated for: ${group.name}`);
+        } catch (error) {
+            console.error(`❌ Failed to update Ephemeral for ${group.name}:`, error);
+            failed++;
+            failedGroups.push({ name: group.name, reason: error.message });
+        }
+        
+        // Delay between operations
+        await delay(DELAY_BETWEEN_OPERATIONS);
     }
     
     // Refresh data
@@ -694,8 +734,25 @@ bot.action(/batch_toggle_ephemeral_(.+)/, async (ctx) => {
             groups[i].metadata = groupFullInfo.metadata;
             groups[i].fullInfo = groupFullInfo;
             groups[i].isBotAdmin = groupFullInfo.isBotAdmin;
-        } catch (error) {}
+        } catch (error) {
+            console.error(`Failed to refresh group ${groups[i].name}:`, error);
+        }
     }
+    
+    // Show result summary
+    let resultMsg = `✅ *Pesan Sementara Diperbarui*\n\n`;
+    resultMsg += `📊 *Hasil:*\n`;
+    resultMsg += `✅ Berhasil: ${processed} grup\n`;
+    resultMsg += `❌ Gagal: ${failed} grup\n`;
+    
+    if (failedGroups.length > 0) {
+        resultMsg += `\n*Detail Gagal:*\n`;
+        failedGroups.forEach((fg, idx) => {
+            resultMsg += `${idx + 1}. ${fg.name} - ${fg.reason}\n`;
+        });
+    }
+    
+    await ctx.reply(resultMsg, { parse_mode: 'Markdown' });
     
     await updateBatchMessage(ctx, sock, batchId, groups);
 });
@@ -712,6 +769,9 @@ bot.action(/batch_toggle_approve_(.+)/, async (ctx) => {
     
     await safeAnswerCbQuery(ctx, '🔄 Memproses...');
     
+    // Update message to show progress
+    await ctx.editMessageText('🔄 *Sedang memproses pengaturan Setujui Anggota...*\n\n_Mohon tunggu, ini mungkin memakan waktu beberapa saat_', { parse_mode: 'Markdown' });
+    
     // Determine target state
     let onCount = 0, offCount = 0;
     groups.forEach(group => {
@@ -722,17 +782,30 @@ bot.action(/batch_toggle_approve_(.+)/, async (ctx) => {
     
     let processed = 0;
     let failed = 0;
+    const failedGroups = [];
     
     for (const group of groups) {
-        try {
-            const mode = targetApprove ? 'on' : 'off';
-            await sock.groupJoinApprovalMode(group.id, mode);
-            processed++;
-            await new Promise(resolve => setTimeout(resolve, 300));
-        } catch (error) {
-            console.error('Error batch approve:', error);
+        if (!group.isBotAdmin) {
             failed++;
+            failedGroups.push({ name: group.name, reason: 'Bot bukan admin' });
+            continue;
         }
+        
+        try {
+            await retryOperation(async () => {
+                const mode = targetApprove ? 'on' : 'off';
+                await sock.groupJoinApprovalMode(group.id, mode);
+            });
+            processed++;
+            console.log(`✅ Join Approval updated for: ${group.name}`);
+        } catch (error) {
+            console.error(`❌ Failed to update Join Approval for ${group.name}:`, error);
+            failed++;
+            failedGroups.push({ name: group.name, reason: error.message });
+        }
+        
+        // Delay between operations
+        await delay(DELAY_BETWEEN_OPERATIONS);
     }
     
     // Refresh data
@@ -742,8 +815,25 @@ bot.action(/batch_toggle_approve_(.+)/, async (ctx) => {
             groups[i].metadata = groupFullInfo.metadata;
             groups[i].fullInfo = groupFullInfo;
             groups[i].isBotAdmin = groupFullInfo.isBotAdmin;
-        } catch (error) {}
+        } catch (error) {
+            console.error(`Failed to refresh group ${groups[i].name}:`, error);
+        }
     }
+    
+    // Show result summary
+    let resultMsg = `✅ *Setujui Anggota Diperbarui*\n\n`;
+    resultMsg += `📊 *Hasil:*\n`;
+    resultMsg += `✅ Berhasil: ${processed} grup\n`;
+    resultMsg += `❌ Gagal: ${failed} grup\n`;
+    
+    if (failedGroups.length > 0) {
+        resultMsg += `\n*Detail Gagal:*\n`;
+        failedGroups.forEach((fg, idx) => {
+            resultMsg += `${idx + 1}. ${fg.name} - ${fg.reason}\n`;
+        });
+    }
+    
+    await ctx.reply(resultMsg, { parse_mode: 'Markdown' });
     
     await updateBatchMessage(ctx, sock, batchId, groups);
 });
@@ -782,7 +872,6 @@ async function updateBatchMessage(ctx, sock, batchId, groups) {
     let stats = {
         editInfo: { on: 0, off: 0 },
         sendMessage: { on: 0, off: 0 },
-        addMember: { on: 0, off: 0 },
         ephemeral: { on: 0, off: 0 },
         approveMembers: { on: 0, off: 0 },
         adminCount: 0,
@@ -805,13 +894,6 @@ async function updateBatchMessage(ctx, sock, batchId, groups) {
         if (metadata.announce) stats.sendMessage.off++;
         else stats.sendMessage.on++;
         
-        // Add Member - Updated logic
-        if (metadata.memberAddMode === 'admin_add') {
-            stats.addMember.off++;
-        } else {
-            stats.addMember.on++;
-        }
-        
         // Ephemeral
         if (fullInfo.ephemeral > 0) stats.ephemeral.on++;
         else stats.ephemeral.off++;
@@ -830,10 +912,10 @@ async function updateBatchMessage(ctx, sock, batchId, groups) {
     });
     
     message += `\n📊 *Status Bot:*\n`;
+    message += `👑 Admin: ${stats.adminCount} grup | ❌ Bukan Admin: ${stats.nonAdminCount} grup\n`;
     message += `\n📊 *Statistik Pengaturan:*\n`;
     message += `📝 Edit Info: ${stats.editInfo.on} ON, ${stats.editInfo.off} OFF\n`;
     message += `💬 Kirim Pesan: ${stats.sendMessage.on} ON, ${stats.sendMessage.off} OFF\n`;
-    message += `➕ Tambah Anggota: ${stats.addMember.on} ON, ${stats.addMember.off} OFF\n`;
     message += `⏰ Pesan Sementara: ${stats.ephemeral.on} ON, ${stats.ephemeral.off} OFF\n`;
     message += `✅ Setujui Anggota: ${stats.approveMembers.on} ON, ${stats.approveMembers.off} OFF\n`;
     
@@ -843,14 +925,12 @@ async function updateBatchMessage(ctx, sock, batchId, groups) {
     // Determine button states based on majority
     const editInfoState = stats.editInfo.on > stats.editInfo.off ? '✅ ON' : '❌ OFF';
     const sendMessageState = stats.sendMessage.on > stats.sendMessage.off ? '✅ ON' : '❌ OFF';
-    const addMemberState = stats.addMember.on > stats.addMember.off ? '✅ ON' : '❌ OFF';
     const ephemeralState = stats.ephemeral.on > stats.ephemeral.off ? '✅ ON' : '❌ OFF';
     const approveMembersState = stats.approveMembers.on > stats.approveMembers.off ? '✅ ON' : '❌ OFF';
     
     const keyboard = [
         [Markup.button.callback(`📝 Edit Info Grup: ${editInfoState}`, `batch_toggle_edit_${batchId}`)],
         [Markup.button.callback(`💬 Kirim Pesan: ${sendMessageState}`, `batch_toggle_send_${batchId}`)],
-        [Markup.button.callback(`➕ Tambah Anggota: ${addMemberState}`, `batch_toggle_add_${batchId}`)],
         [Markup.button.callback(`⏰ Pesan Sementara: ${ephemeralState}`, `batch_toggle_ephemeral_${batchId}`)],
         [Markup.button.callback(`✅ Setujui Anggota: ${approveMembersState}`, `batch_toggle_approve_${batchId}`)],
         [Markup.button.callback('🔄 Refresh', `refresh_batch_${batchId}`)],
