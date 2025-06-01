@@ -1,4 +1,5 @@
 //
+//
 const { Telegraf, Markup } = require('telegraf');
 const { makeWASocket, DisconnectReason, useMultiFileAuthState, getAggregateVotesInPollMessage } = require('@whiskeysockets/baileys');
 const QRCode = require('qrcode');
@@ -432,8 +433,8 @@ async function showBatchGroupManagement(ctx, sock, batchId, groups, errors) {
         if (metadata.announce) stats.sendMessage.off++;
         else stats.sendMessage.on++;
         
-        // Add Member
-        if (metadata.memberAddMode === true || metadata.memberAddMode === 'admin_add') {
+        // Add Member - Updated logic
+        if (metadata.memberAddMode === 'admin_add') {
             stats.addMember.off++;
         } else {
             stats.addMember.on++;
@@ -448,6 +449,7 @@ async function showBatchGroupManagement(ctx, sock, batchId, groups, errors) {
         else stats.approveMembers.off++;
     });
     
+    // Rest of the function remains the same...
     let message = `🎯 *Mengelola ${groups.length} Grup WhatsApp*\n\n`;
     
     // Show groups list
@@ -461,9 +463,6 @@ async function showBatchGroupManagement(ctx, sock, batchId, groups, errors) {
     }
     
     message += `\n📊 *Status Bot:*\n`;
-    message += `✅ Admin di ${stats.adminCount} grup\n`;
-    message += `❌ Bukan admin di ${stats.nonAdminCount} grup\n`;
-    
     message += `\n📊 *Statistik Pengaturan:*\n`;
     message += `📝 Edit Info: ${stats.editInfo.on} ON, ${stats.editInfo.off} OFF\n`;
     message += `💬 Kirim Pesan: ${stats.sendMessage.on} ON, ${stats.sendMessage.off} OFF\n`;
@@ -616,7 +615,7 @@ bot.action(/batch_toggle_add_(.+)/, async (ctx) => {
     // Determine target state
     let onCount = 0, offCount = 0;
     groups.forEach(group => {
-        if (group.metadata.memberAddMode === true || group.metadata.memberAddMode === 'admin_add') {
+        if (group.metadata.memberAddMode === 'admin_add') {
             offCount++;
         } else {
             onCount++;
@@ -629,11 +628,9 @@ bot.action(/batch_toggle_add_(.+)/, async (ctx) => {
     
     for (const group of groups) {
         try {
-            if (targetAllCanAdd) {
-                await sock.groupSettingUpdate(group.id, 'member_add_mode', 'all_member_add');
-            } else {
-                await sock.groupSettingUpdate(group.id, 'member_add_mode', 'admin_add');
-            }
+            await sock.groupUpdateSettings(group.id, {
+                memberAddMode: targetAllCanAdd ? 'all_add' : 'admin_add'
+            });
             processed++;
             await new Promise(resolve => setTimeout(resolve, 300));
         } catch (error) {
@@ -808,8 +805,8 @@ async function updateBatchMessage(ctx, sock, batchId, groups) {
         if (metadata.announce) stats.sendMessage.off++;
         else stats.sendMessage.on++;
         
-        // Add Member
-        if (metadata.memberAddMode === true || metadata.memberAddMode === 'admin_add') {
+        // Add Member - Updated logic
+        if (metadata.memberAddMode === 'admin_add') {
             stats.addMember.off++;
         } else {
             stats.addMember.on++;
@@ -833,9 +830,6 @@ async function updateBatchMessage(ctx, sock, batchId, groups) {
     });
     
     message += `\n📊 *Status Bot:*\n`;
-    message += `✅ Admin di ${stats.adminCount} grup\n`;
-    message += `❌ Bukan admin di ${stats.nonAdminCount} grup\n`;
-    
     message += `\n📊 *Statistik Pengaturan:*\n`;
     message += `📝 Edit Info: ${stats.editInfo.on} ON, ${stats.editInfo.off} OFF\n`;
     message += `💬 Kirim Pesan: ${stats.sendMessage.on} ON, ${stats.sendMessage.off} OFF\n`;
