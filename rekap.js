@@ -385,7 +385,7 @@ function createKeyboard(isFinished = false) {
 
 // Fungsi update pesan processing
 async function updateProcessingMessage(chatId, messageId, groups, isProcessing = true) {
-    const statusText = isProcessing ? '⏳ Memproses foto...' : '✅ Siap untuk foto berikutnya';
+    const statusText = isProcessing ? '⏳ Sedang Memproses foto tunggu ...' : '✅ Siap untuk foto berikutnya';
     const groupsList = groups.length > 0 ? 
         groups.map((g, i) => `${i + 1}. ${g.name} - ${g.members} anggota`).join('\n') : 
         'Belum ada grup yang terdeteksi';
@@ -414,7 +414,7 @@ async function processBatchPhotos(userId, chatId) {
     
     // Kirim pesan processing
     const processingMsg = await bot.sendMessage(chatId, 
-        '🤖 **Bot Rekap Grup**\n\n⏳ Memproses foto...\n\n📊 **Hasil Sementara:**\nBelum ada grup yang terdeteksi\n\n💡 Kirim foto grup lainnya atau klik Selesai untuk melihat total', 
+        '🤖 **Bot Rekap Grup**\n\n⏳ Tunggu Masih Memproses foto...\n\n📊 **Hasil Sementara:**\nBelum ada grup yang terdeteksi\n\n💡 Kirim foto grup lainnya atau klik Selesai untuk melihat total', 
         {
             parse_mode: 'Markdown',
             reply_markup: createKeyboard()
@@ -592,6 +592,8 @@ bot.onText(/\/start/, async (msg) => {
 • Support semua bahasa
 • Proses batch super cepat
 • Hasil yang rapi dan akurat
+
+/help untuk bantuan
 
 💡 Kirim foto pertama untuk memulai!`;
 
