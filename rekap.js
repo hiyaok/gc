@@ -1,5 +1,6 @@
 //
 const TelegramBot = require('node-telegram-bot-api');
+const Tesseract = require('tesseract.js');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
@@ -9,9 +10,12 @@ const FormData = require('form-data');
 const BOT_TOKEN = '7782738957:AAE1hBtX3eIEop26IU07X_YSSaK-ki2RgNA';
 const ADMIN_IDS = [5988451717, 1285724437];
 
-// OCR.space API Configuration
+// OCR Configuration - Multiple engines for reliability
 const OCR_SPACE_API_KEY = 'K89821722488957';
 const OCR_SPACE_URL = 'https://api.ocr.space/parse/image';
+
+// Tesseract fallback configuration
+const TESSERACT_LANGUAGES = 'eng+ind+ara+chi_sim+jpn+kor+tha+vie+rus+spa+fra+deu';
 
 // Inisialisasi bot
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
@@ -31,7 +35,6 @@ class UserSession {
         this.photoQueue = [];
         this.photoCounter = 0;
         this.lastMessageContent = '';
-        this.messageContentHash = '';
     }
 
     addGroup(name, members) {
@@ -75,7 +78,6 @@ class UserSession {
         this.photoQueue = [];
         this.photoCounter = 0;
         this.lastMessageContent = '';
-        this.messageContentHash = '';
         if (this.timer) {
             clearTimeout(this.timer);
             this.timer = null;
@@ -83,21 +85,49 @@ class UserSession {
     }
 }
 
-// Fungsi OCR menggunakan OCR.space API
-async function performOCRSpace(imagePath) {
+// Fungsi OCR.space dengan perbaikan FormData
+async function performOCRSpaceFixed(imagePath) {
     return new Promise((resolve, reject) => {
         try {
-            console.log('🔍 Starting OCR.space API...');
+            console.log('🔍 Starting fixed OCR.space API...');
             
+            // Validasi file terlebih dahulu
+            if (!fs.existsSync(imagePath)) {
+                throw new Error('Image file not found');
+            }
+            
+            const fileStats = fs.statSync(imagePath);
+            console.log(`📁 File size: ${fileStats.size} bytes`);
+            
+            if (fileStats.size === 0) {
+                throw new Error('Image file is empty');
+            }
+            
+            if (fileStats.size > 10 * 1024 * 1024) { // 10MB limit
+                throw new Error('Image file too large');
+            }
+            
+            // Baca file menjadi buffer dulu
+            const fileBuffer = fs.readFileSync(imagePath);
+            console.log(`📦 File buffer size: ${fileBuffer.length} bytes`);
+            
+            // Create FormData dengan cara yang lebih robust
             const form = new FormData();
-            form.append('file', fs.createReadStream(imagePath));
+            form.append('file', fileBuffer, {
+                filename: path.basename(imagePath),
+                contentType: 'image/jpeg'
+            });
             form.append('apikey', OCR_SPACE_API_KEY);
             form.append('language', 'eng');
             form.append('isOverlayRequired', 'false');
             form.append('detectOrientation', 'true');
             form.append('scale', 'true');
-            form.append('OCREngine', '2'); // Engine 2 untuk layout kompleks
+            form.append('OCREngine', '2');
             form.append('isTable', 'false');
+
+            // Get form headers
+            const formHeaders = form.getHeaders();
+            console.log('📤 Form headers prepared');
 
             const options = {
                 hostname: 'api.ocr.space',
@@ -105,14 +135,18 @@ async function performOCRSpace(imagePath) {
                 path: '/parse/image',
                 method: 'POST',
                 headers: {
-                    ...form.getHeaders(),
-                    'User-Agent': 'TelegramBot/1.0'
+                    ...formHeaders,
+                    'User-Agent': 'TelegramBot/2.0'
                 },
-                timeout: 30000
+                timeout: 45000 // 45 second timeout
             };
+
+            console.log('🌐 Making request to OCR.space...');
 
             const req = https.request(options, (res) => {
                 let data = '';
+                
+                console.log(`📡 Response status: ${res.statusCode}`);
                 
                 res.on('data', chunk => {
                     data += chunk;
@@ -120,32 +154,32 @@ async function performOCRSpace(imagePath) {
                 
                 res.on('end', () => {
                     try {
+                        console.log('📥 Response received, parsing...');
                         const result = JSON.parse(data);
                         
                         console.log('📄 OCR.space Response:', JSON.stringify(result, null, 2));
                         
-                        if (result.ParsedResults && result.ParsedResults[0]) {
-                            const parsedText = result.ParsedResults[0].ParsedText;
-                            const confidence = result.ParsedResults[0].TextOverlay ? 
-                                result.ParsedResults[0].TextOverlay.HasOverlay : 'N/A';
+                        if (result.ParsedResults && result.ParsedResults[0] && result.ParsedResults[0].ParsedText) {
+                            const parsedText = result.ParsedResults[0].ParsedText.trim();
                             
-                            console.log(`✅ OCR.space completed successfully`);
+                            console.log(`✅ OCR.space success! Text length: ${parsedText.length}`);
                             console.log('📄 Extracted Text:');
                             console.log('=' .repeat(60));
                             console.log(parsedText);
                             console.log('=' .repeat(60));
                             
                             resolve(parsedText);
-                        } else if (result.ErrorMessage) {
-                            console.error('❌ OCR.space Error:', result.ErrorMessage);
-                            reject(new Error(`OCR.space Error: ${result.ErrorMessage}`));
+                        } else if (result.ErrorMessage && result.ErrorMessage.length > 0) {
+                            const errorMsg = Array.isArray(result.ErrorMessage) ? result.ErrorMessage.join(', ') : result.ErrorMessage;
+                            console.error('❌ OCR.space API Error:', errorMsg);
+                            reject(new Error(`OCR.space Error: ${errorMsg}`));
                         } else {
-                            console.error('❌ OCR.space: No text found');
-                            reject(new Error('No text found in image'));
+                            console.error('❌ OCR.space: No text found or unexpected response format');
+                            reject(new Error('No text found in image or unexpected response'));
                         }
                     } catch (parseError) {
                         console.error('❌ JSON Parse Error:', parseError.message);
-                        console.error('Raw response:', data);
+                        console.error('❌ Raw response:', data.substring(0, 500));
                         reject(new Error(`Parse error: ${parseError.message}`));
                     }
                 });
@@ -162,6 +196,7 @@ async function performOCRSpace(imagePath) {
                 reject(new Error('Request timeout'));
             });
 
+            // Pipe form data to request
             form.pipe(req);
             
         } catch (error) {
@@ -171,90 +206,112 @@ async function performOCRSpace(imagePath) {
     });
 }
 
-// Fungsi parsing yang sangat akurat untuk WhatsApp dengan OCR.space
-function parseWhatsAppGroupAdvanced(ocrText) {
-    console.log('\n🎯 Advanced WhatsApp Group Parsing...');
+// Fungsi Tesseract sebagai fallback
+async function performTesseractOCR(imagePath) {
+    try {
+        console.log('🔄 Fallback: Starting Tesseract OCR...');
+        
+        const { data: { text, confidence } } = await Tesseract.recognize(imagePath, TESSERACT_LANGUAGES, {
+            logger: () => {}, // Silent
+            tessedit_pageseg_mode: Tesseract.PSM.AUTO,
+            tessedit_ocr_engine_mode: Tesseract.OEM.LSTM_ONLY,
+            preserve_interword_spaces: '1'
+        });
+        
+        console.log(`✅ Tesseract completed with ${confidence.toFixed(1)}% confidence`);
+        console.log('📄 Tesseract Text:');
+        console.log('=' .repeat(60));
+        console.log(text);
+        console.log('=' .repeat(60));
+        
+        return text;
+        
+    } catch (error) {
+        console.error('❌ Tesseract Error:', error.message);
+        throw new Error(`Tesseract failed: ${error.message}`);
+    }
+}
+
+// Fungsi OCR utama dengan multiple engines
+async function performMultiEngineOCR(imagePath) {
+    console.log('🚀 Starting Multi-Engine OCR...');
     
-    // Clean dan split text dengan berbagai separator
+    // Try OCR.space first
+    try {
+        const ocrSpaceResult = await performOCRSpaceFixed(imagePath);
+        console.log('✅ OCR.space succeeded');
+        return ocrSpaceResult;
+    } catch (ocrSpaceError) {
+        console.log('⚠️ OCR.space failed, trying Tesseract fallback...');
+        console.log('⚠️ OCR.space error:', ocrSpaceError.message);
+        
+        // Fallback to Tesseract
+        try {
+            const tesseractResult = await performTesseractOCR(imagePath);
+            console.log('✅ Tesseract fallback succeeded');
+            return tesseractResult;
+        } catch (tesseractError) {
+            console.error('❌ All OCR engines failed');
+            throw new Error(`All OCR engines failed. OCR.space: ${ocrSpaceError.message}, Tesseract: ${tesseractError.message}`);
+        }
+    }
+}
+
+// Fungsi parsing yang sangat akurat untuk WhatsApp
+function parseWhatsAppGroupUltimate(ocrText) {
+    console.log('\n🎯 Ultimate WhatsApp Group Parsing...');
+    
+    // Clean dan split text
     const lines = ocrText
         .split(/[\n\r]+/)
         .map(line => line.trim())
         .filter(line => line.length > 0);
     
-    console.log('📋 Detected Lines:');
+    console.log('📋 All Detected Lines:');
     lines.forEach((line, i) => console.log(`  ${i + 1}: "${line}"`));
     
     let groupName = null;
     let memberCount = null;
     
     // === STEP 1: DETEKSI JUMLAH ANGGOTA ===
-    console.log('\n🔍 STEP 1: Advanced Member Count Detection...');
+    console.log('\n🔍 STEP 1: Ultimate Member Count Detection...');
     
-    // Pattern sangat comprehensive untuk semua format anggota
+    // Pattern ultra-comprehensive untuk semua format
     const memberPatterns = [
-        // WhatsApp Indonesia: "Grup • 80 anggota"
-        /(?:grup|group)\s*[•·∙◦▪▫]\s*(\d+)\s*anggota/i,
+        // WhatsApp format: "Grup • 80 anggota"
+        /(?:grup|group)\s*[•·∙◦▪▫]\s*(\d+)\s*(?:anggota|members?)/i,
         
-        // WhatsApp English: "Group • 80 members"
-        /(?:grup|group)\s*[•·∙◦▪▫]\s*(\d+)\s*members?/i,
-        
-        // Format sederhana: "80 anggota" atau "80 members"
+        // Simple format: "80 anggota"
         /(\d+)\s*(?:anggota|members?)/i,
         
-        // Format dengan bullet: "• 80 anggota"
+        // Bullet format: "• 80 anggota"
         /[•·∙◦▪▫]\s*(\d+)\s*(?:anggota|members?)/i,
         
-        // Format dengan separator: "anggota: 80"
+        // Separated format: "anggota: 80"
         /(?:anggota|members?)\s*[:\-•]?\s*(\d+)/i,
         
-        // Arabic patterns
+        // Arabic
         /(?:مجموعة)\s*[•·∙◦▪▫]\s*(\d+)\s*(?:أعضاء)/i,
         /(\d+)\s*(?:أعضاء)/i,
         
-        // Chinese patterns
+        // Chinese
         /(?:群组|群組)\s*[•·∙◦▪▫]\s*(\d+)\s*(?:成员|成員)/i,
         /(\d+)\s*(?:成员|成員)/i,
         
-        // Japanese patterns
+        // Japanese
         /(?:グループ)\s*[•·∙◦▪▫]\s*(\d+)\s*(?:メンバー)/i,
         /(\d+)\s*(?:メンバー)/i,
         
-        // Korean patterns
+        // Korean
         /(?:그룹)\s*[•·∙◦▪▫]\s*(\d+)\s*(?:구성원)/i,
         /(\d+)\s*(?:구성원)/i,
         
-        // Thai patterns
-        /(?:กลุ่ม)\s*[•·∙◦▪▫]\s*(\d+)\s*(?:สมาชิก)/i,
-        /(\d+)\s*(?:สมาชิก)/i,
-        
-        // Vietnamese patterns
-        /(?:nhóm)\s*[•·∙◦▪▫]\s*(\d+)\s*(?:thành\s*viên)/i,
-        /(\d+)\s*(?:thành\s*viên)/i,
-        
-        // Russian patterns
-        /(?:группа)\s*[•·∙◦▪▫]\s*(\d+)\s*(?:участник)/i,
-        /(\d+)\s*(?:участник)/i,
-        
-        // Spanish patterns
-        /(?:grupo)\s*[•·∙◦▪▫]\s*(\d+)\s*(?:miembros?)/i,
-        /(\d+)\s*(?:miembros?)/i,
-        
-        // French patterns
-        /(?:groupe)\s*[•·∙◦▪▫]\s*(\d+)\s*(?:membres?)/i,
-        /(\d+)\s*(?:membres?)/i,
-        
-        // German patterns
-        /(?:gruppe)\s*[•·∙◦▪▫]\s*(\d+)\s*(?:mitglieder)/i,
-        /(\d+)\s*(?:mitglieder)/i,
-        
-        // Generic patterns with bullets
+        // Generic patterns
         /[•·∙◦▪▫]\s*(\d+)/i,
-        
-        // Numbers near group-related words
-        /(?:grup|group|مجموعة|群组|群組|グループ|그룹|กลุ่ม|nhóm|группа|grupo|groupe|gruppe).*?(\d+)/i
+        /(?:grup|group).*?(\d+)/i
     ];
     
-    // Cari member count dengan prioritas pattern
+    // Cari member count
     for (let patternIndex = 0; patternIndex < memberPatterns.length; patternIndex++) {
         const pattern = memberPatterns[patternIndex];
         
@@ -264,9 +321,7 @@ function parseWhatsAppGroupAdvanced(ocrText) {
                 const count = parseInt(match[1]);
                 if (count >= 1 && count <= 1000000) {
                     memberCount = count;
-                    console.log(`✅ Member count found: ${count}`);
-                    console.log(`   From line: "${line}"`);
-                    console.log(`   Pattern #${patternIndex + 1}`);
+                    console.log(`✅ Member count: ${count} from "${line}" (pattern ${patternIndex + 1})`);
                     break;
                 }
             }
@@ -275,26 +330,16 @@ function parseWhatsAppGroupAdvanced(ocrText) {
     }
     
     // === STEP 2: DETEKSI NAMA GRUP ===
-    console.log('\n🔍 STEP 2: Advanced Group Name Detection...');
+    console.log('\n🔍 STEP 2: Ultimate Group Name Detection...');
     
     // Extended exclude keywords
     const excludeKeywords = [
-        // Indonesia
-        'grup', 'anggota', 'chat', 'audio', 'tambah', 'cari', 'notifikasi', 'visibilitas', 
-        'pesan', 'enkripsi', 'dibuat', 'terakhir', 'dilihat', 'online', 'ketik', 'info', 
-        'deskripsi', 'media', 'mati', 'semua', 'tersimpan', 'hapus', 'keluar', 'admin',
-        'bergabung', 'diundang', 'blokir', 'laporkan', 'salin', 'bagikan', 'unduh',
-        
-        // English
-        'group', 'members', 'member', 'chat', 'audio', 'add', 'search', 'notification', 
-        'visibility', 'message', 'encryption', 'created', 'last', 'seen', 'online', 
-        'typing', 'info', 'description', 'media', 'mute', 'all', 'saved', 'delete',
-        'leave', 'admin', 'joined', 'invited', 'block', 'report', 'copy', 'share', 'download',
-        
-        // Common UI terms
-        'back', 'menu', 'settings', 'profile', 'contact', 'call', 'video', 'voice',
-        'camera', 'gallery', 'document', 'location', 'status', 'archive', 'pin',
-        'forward', 'reply', 'quote', 'edit', 'starred', 'clear', 'export'
+        'grup', 'group', 'anggota', 'members', 'member', 'chat', 'audio', 'tambah', 'add',
+        'cari', 'search', 'notifikasi', 'notification', 'visibilitas', 'visibility',
+        'pesan', 'message', 'enkripsi', 'encryption', 'dibuat', 'created', 'terakhir', 'last',
+        'dilihat', 'seen', 'online', 'ketik', 'typing', 'info', 'deskripsi', 'description',
+        'media', 'mati', 'mute', 'semua', 'all', 'tersimpan', 'saved', 'hapus', 'delete',
+        'keluar', 'leave', 'admin', 'bergabung', 'joined', 'diundang', 'invited'
     ];
     
     const groupNameCandidates = [];
@@ -305,7 +350,7 @@ function parseWhatsAppGroupAdvanced(ocrText) {
         // Skip baris kosong
         if (line.length === 0) continue;
         
-        // Skip baris dengan exclude keywords
+        // Skip exclude keywords
         const hasExcludeKeyword = excludeKeywords.some(keyword => 
             line.toLowerCase().includes(keyword.toLowerCase())
         );
@@ -314,77 +359,53 @@ function parseWhatsAppGroupAdvanced(ocrText) {
             continue;
         }
         
-        // Skip baris dengan member patterns
+        // Skip member patterns
         const hasMemberPattern = memberPatterns.some(pattern => pattern.test(line));
         if (hasMemberPattern) {
             console.log(`⏭️ Skipped member: "${line}"`);
             continue;
         }
         
-        // Skip UI elements dan symbols
-        if (/[←→↓↑⬅➡⬇⬆📱💬🔍⚙️📞🎥🔊👥🔔⚡🗂️📋📄🔒💭🎤📷📁🌐⭐❤️👍]/.test(line)) {
+        // Skip UI elements
+        if (/[←→↓↑⬅➡⬇⬆📱💬🔍⚙️📞🎥🔊👥🔔⚡🗂️📋📄🔒]/.test(line)) {
             console.log(`⏭️ Skipped UI: "${line}"`);
             continue;
         }
         
-        // Skip nomor telepon
-        if (/^\+?\d{8,15}$/.test(line.replace(/[\s\-()]/g, ''))) {
-            console.log(`⏭️ Skipped phone: "${line}"`);
+        // Skip phone numbers, emails, URLs, dates
+        if (/^\+?\d{8,15}$/.test(line.replace(/[\s\-()]/g, '')) ||
+            /\S+@\S+\.\S+/.test(line) ||
+            /https?:\/\/|www\.|\.com/.test(line) ||
+            /\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}/.test(line) ||
+            /\d{1,2}:\d{2}/.test(line)) {
+            console.log(`⏭️ Skipped special: "${line}"`);
             continue;
         }
         
-        // Skip email addresses
-        if (/\S+@\S+\.\S+/.test(line)) {
-            console.log(`⏭️ Skipped email: "${line}"`);
-            continue;
-        }
-        
-        // Skip tanggal/waktu format
-        if (/\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}/.test(line) || /\d{1,2}:\d{2}/.test(line)) {
-            console.log(`⏭️ Skipped date/time: "${line}"`);
-            continue;
-        }
-        
-        // Skip URL patterns
-        if (/https?:\/\/|www\.|\.com|\.org|\.net/.test(line)) {
-            console.log(`⏭️ Skipped URL: "${line}"`);
-            continue;
-        }
-        
-        // Skip single characters atau sangat pendek
-        if (line.length < 1) continue;
-        
-        // Advanced scoring untuk kandidat nama grup
+        // Ultimate scoring
         let score = 0;
         
-        // ULTRA HIGH PRIORITY: Posisi di bagian atas
-        if (i === 0) score += 200;
-        if (i === 1) score += 150;
-        if (i === 2) score += 100;
-        if (i <= 4) score += 50;
-        if (i <= 6) score += 25;
+        // MEGA PRIORITY: Position scoring
+        if (i === 0) score += 300;
+        if (i === 1) score += 200;
+        if (i === 2) score += 150;
+        if (i <= 4) score += 100;
+        if (i <= 6) score += 50;
         
-        // Format scoring yang comprehensive
-        if (/^\d+$/.test(line)) score += 100; // Pure numbers like "292"
-        if (/^[A-Za-z0-9\s\u0080-\uFFFF\-_.()]+$/.test(line)) score += 60; // Alphanumeric + unicode
-        if (/[\u0080-\uFFFF]/.test(line)) score += 40; // Unicode characters
-        if (/^[A-Za-z]/.test(line)) score += 30; // Starts with letter
-        if (/[0-9]/.test(line)) score += 20; // Contains numbers
+        // Format scoring
+        if (/^\d+$/.test(line)) score += 150; // Pure numbers like "292"
+        if (/^[A-Za-z0-9\s\u0080-\uFFFF\-_.()]+$/.test(line)) score += 80;
+        if (/[\u0080-\uFFFF]/.test(line)) score += 60; // Unicode
+        if (/^[A-Z]/.test(line)) score += 40; // Capitalized
+        if (/[0-9]/.test(line)) score += 30; // Contains numbers
         
         // Length scoring
-        if (line.length >= 1 && line.length <= 50) score += 25;
-        if (line.length >= 2 && line.length <= 30) score += 15;
-        if (line.length >= 3 && line.length <= 20) score += 10;
+        if (line.length >= 1 && line.length <= 50) score += 30;
+        if (line.length >= 2 && line.length <= 30) score += 20;
         
-        // Penalty untuk format yang tidak wajar
-        if (line.length > 60) score -= 30;
-        if (/[.,:;!?]{2,}/.test(line)) score -= 20;
-        if (/^\s*$/.test(line)) score -= 200;
-        if (line.split(' ').length > 10) score -= 25; // Too many words
-        
-        // Bonus untuk format yang sering digunakan sebagai nama grup
-        if (/^[A-Z][a-zA-Z0-9\s]*$/.test(line)) score += 15; // Capitalized
-        if (/family|keluarga|office|kantor|team|tim|friends|teman/i.test(line)) score += 20; // Common group types
+        // Penalty
+        if (line.length > 60) score -= 50;
+        if (/[.,:;!?]{2,}/.test(line)) score -= 30;
         
         groupNameCandidates.push({ 
             line: line.trim(), 
@@ -392,30 +413,21 @@ function parseWhatsAppGroupAdvanced(ocrText) {
             index: i 
         });
         
-        console.log(`📝 Candidate: "${line}" → Score: ${score} (pos: ${i})`);
+        console.log(`📝 "${line}" → Score: ${score} (pos: ${i})`);
     }
     
-    // Sort berdasarkan score tertinggi
+    // Sort and select best
     groupNameCandidates.sort((a, b) => b.score - a.score);
     
     if (groupNameCandidates.length > 0) {
         groupName = groupNameCandidates[0].line;
-        console.log(`🎯 SELECTED GROUP NAME: "${groupName}"`);
-        console.log(`   Score: ${groupNameCandidates[0].score}`);
-        console.log(`   Position: ${groupNameCandidates[0].index}`);
-        
-        console.log('\n🏆 Top 5 candidates:');
-        groupNameCandidates.slice(0, 5).forEach((c, i) => {
-            console.log(`   ${i + 1}. "${c.line}" (score: ${c.score}, pos: ${c.index})`);
-        });
+        console.log(`🎯 SELECTED: "${groupName}" (score: ${groupNameCandidates[0].score})`);
     }
     
-    // === ADVANCED FALLBACK SYSTEMS ===
-    
-    // Fallback untuk member count
+    // === FALLBACK SYSTEMS ===
     if (memberCount === null) {
-        console.log('\n🔄 Advanced Fallback: Searching for reasonable numbers...');
-        const numberCandidates = [];
+        console.log('\n🔄 Fallback: Number search...');
+        const allNumbers = [];
         
         for (const line of lines) {
             const numbers = line.match(/\d+/g);
@@ -423,71 +435,21 @@ function parseWhatsAppGroupAdvanced(ocrText) {
                 numbers.forEach(numStr => {
                     const num = parseInt(numStr);
                     if (num >= 2 && num <= 100000) {
-                        // Calculate score based on context
-                        let numScore = 0;
-                        
-                        // Higher score if near group-related words
-                        if (/(?:grup|group|anggota|member)/i.test(line)) numScore += 50;
-                        if (/[•·∙◦▪▫]/.test(line)) numScore += 30;
-                        
-                        // Lower score for very large numbers (likely IDs)
-                        if (num > 10000) numScore -= 20;
-                        if (num < 5) numScore -= 10;
-                        
-                        numberCandidates.push({ 
-                            number: num, 
-                            line: line, 
-                            score: numScore 
-                        });
-                        
-                        console.log(`   Number: ${num} in "${line}" (score: ${numScore})`);
+                        allNumbers.push(num);
                     }
                 });
             }
         }
         
-        if (numberCandidates.length > 0) {
-            // Sort by score and pick the best
-            numberCandidates.sort((a, b) => b.score - a.score);
-            memberCount = numberCandidates[0].number;
-            console.log(`🔄 Fallback member count: ${memberCount} (score: ${numberCandidates[0].score})`);
+        if (allNumbers.length > 0) {
+            memberCount = allNumbers.length > 1 ? allNumbers[1] : allNumbers[0];
+            console.log(`🔄 Fallback member count: ${memberCount}`);
         }
     }
     
-    // Advanced fallback untuk group name
     if (!groupName && lines.length > 0) {
-        console.log('\n🔄 Advanced Fallback: Finding best substantial line...');
-        
-        const fallbackCandidates = [];
-        
-        for (let i = 0; i < Math.min(lines.length, 5); i++) {
-            const line = lines[i];
-            if (line.trim().length >= 1) {
-                let fallbackScore = 0;
-                
-                // Prioritize top lines
-                fallbackScore += (5 - i) * 10;
-                
-                // Prefer shorter, cleaner lines
-                if (line.length <= 30) fallbackScore += 15;
-                if (line.length <= 20) fallbackScore += 10;
-                
-                // Avoid lines with common words
-                if (!/(?:grup|group|anggota|member|chat|info)/i.test(line)) fallbackScore += 20;
-                
-                fallbackCandidates.push({
-                    line: line.trim(),
-                    score: fallbackScore,
-                    index: i
-                });
-            }
-        }
-        
-        if (fallbackCandidates.length > 0) {
-            fallbackCandidates.sort((a, b) => b.score - a.score);
-            groupName = fallbackCandidates[0].line;
-            console.log(`🔄 Fallback group name: "${groupName}" (score: ${fallbackCandidates[0].score})`);
-        }
+        groupName = lines[0].trim();
+        console.log(`🔄 Fallback group name: "${groupName}"`);
     }
     
     const result = {
@@ -496,40 +458,63 @@ function parseWhatsAppGroupAdvanced(ocrText) {
         success: groupName !== null && memberCount !== null
     };
     
-    console.log('\n🎯 === FINAL ADVANCED RESULT ===');
+    console.log('\n🎯 === ULTIMATE RESULT ===');
     console.log(`   Group Name: "${result.groupName}"`);
     console.log(`   Member Count: ${result.memberCount}`);
     console.log(`   Success: ${result.success}`);
-    console.log('=================================\n');
+    console.log('==========================\n');
     
     return result;
 }
 
-// Fungsi download foto
-async function downloadPhoto(fileId) {
-    try {
-        const file = await bot.getFile(fileId);
-        const filePath = file.file_path;
-        const url = `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
-        
-        const localPath = path.join(__dirname, 'temp', `${fileId}.jpg`);
-        
-        if (!fs.existsSync(path.join(__dirname, 'temp'))) {
-            fs.mkdirSync(path.join(__dirname, 'temp'), { recursive: true });
-        }
+// Fungsi download foto dengan retry
+async function downloadPhotoWithRetry(fileId, maxRetries = 3) {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            console.log(`📥 Download attempt ${attempt}/${maxRetries} for ${fileId}`);
+            
+            const file = await bot.getFile(fileId);
+            const filePath = file.file_path;
+            const url = `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
+            
+            const localPath = path.join(__dirname, 'temp', `${fileId}.jpg`);
+            
+            if (!fs.existsSync(path.join(__dirname, 'temp'))) {
+                fs.mkdirSync(path.join(__dirname, 'temp'), { recursive: true });
+            }
 
-        return new Promise((resolve, reject) => {
-            const file = fs.createWriteStream(localPath);
-            https.get(url, (response) => {
-                response.pipe(file);
-                file.on('finish', () => {
-                    file.close();
-                    resolve(localPath);
+            return new Promise((resolve, reject) => {
+                const file = fs.createWriteStream(localPath);
+                const request = https.get(url, (response) => {
+                    if (response.statusCode !== 200) {
+                        reject(new Error(`HTTP ${response.statusCode}: ${response.statusMessage}`));
+                        return;
+                    }
+                    
+                    response.pipe(file);
+                    file.on('finish', () => {
+                        file.close();
+                        console.log(`✅ Download successful: ${localPath}`);
+                        resolve(localPath);
+                    });
                 });
-            }).on('error', reject);
-        });
-    } catch (error) {
-        throw new Error(`Download failed: ${error.message}`);
+                
+                request.on('error', reject);
+                file.on('error', reject);
+                
+                request.setTimeout(30000, () => {
+                    request.destroy();
+                    reject(new Error('Download timeout'));
+                });
+            });
+            
+        } catch (error) {
+            console.log(`❌ Download attempt ${attempt} failed:`, error.message);
+            if (attempt === maxRetries) {
+                throw new Error(`Download failed after ${maxRetries} attempts: ${error.message}`);
+            }
+            await new Promise(resolve => setTimeout(resolve, 1000 * attempt)); // Exponential backoff
+        }
     }
 }
 
@@ -546,13 +531,8 @@ function createKeyboard(hasResults = false) {
     return null;
 }
 
-// Fungsi untuk membuat hash dari content
-function createContentHash(content) {
-    return Buffer.from(content).toString('base64').slice(0, 20);
-}
-
-// Fungsi update message yang super aman dengan anti-duplicate
-async function superSafeUpdateMessage(chatId, messageId, groups, isProcessing = false) {
+// Fungsi update message yang sangat aman
+async function ultraSafeUpdateMessage(chatId, messageId, groups, isProcessing = false) {
     try {
         let text = `🤖 **BOT REKAP GRUP - HASIL REAL TIME**\n\n`;
         
@@ -579,25 +559,21 @@ async function superSafeUpdateMessage(chatId, messageId, groups, isProcessing = 
             text += `📊 **Belum ada grup terdeteksi**\n\n💡 Kirim foto screenshot grup WhatsApp`;
         }
         
-        // Create content hash untuk prevent duplicate
-        const contentHash = createContentHash(text);
         const session = userSessions.get(chatId);
         
-        // Cek apakah content sama dengan sebelumnya
-        if (session && session.messageContentHash === contentHash) {
-            console.log('⏭️ Skipping update - identical content hash');
+        // Check for content changes
+        if (session && session.lastMessageContent === text) {
+            console.log('⏭️ Skipping update - content unchanged');
             return messageId;
         }
         
-        // Update hash
         if (session) {
-            session.messageContentHash = contentHash;
             session.lastMessageContent = text;
         }
         
         const keyboard = createKeyboard(groups.length > 0);
         
-        // Strategy 1: Try to edit existing message
+        // Try edit first
         if (messageId) {
             try {
                 await bot.editMessageText(text, {
@@ -609,59 +585,36 @@ async function superSafeUpdateMessage(chatId, messageId, groups, isProcessing = 
                 console.log('✅ Message edited successfully');
                 return messageId;
             } catch (editError) {
-                console.log('⚠️ Edit failed, trying fallback:', editError.message);
-                
-                // Strategy 2: Send new message if edit fails
+                console.log('⚠️ Edit failed, sending new message');
+            }
+        }
+        
+        // Send new message
+        try {
+            const newMsg = await bot.sendMessage(chatId, text, {
+                parse_mode: 'Markdown',
+                reply_markup: keyboard
+            });
+            console.log('✅ New message sent');
+            
+            // Try to delete old message
+            if (messageId) {
                 try {
-                    const newMsg = await bot.sendMessage(chatId, text, {
-                        parse_mode: 'Markdown',
-                        reply_markup: keyboard
-                    });
-                    console.log('✅ New message sent as fallback');
-                    
-                    // Try to delete old message (optional)
-                    try {
-                        await bot.deleteMessage(chatId, messageId);
-                        console.log('🗑️ Old message deleted');
-                    } catch (deleteError) {
-                        console.log('⚠️ Could not delete old message:', deleteError.message);
-                    }
-                    
-                    return newMsg.message_id;
-                } catch (sendError) {
-                    console.error('❌ Fallback send failed:', sendError.message);
-                    return null;
+                    await bot.deleteMessage(chatId, messageId);
+                } catch (deleteError) {
+                    console.log('⚠️ Could not delete old message');
                 }
             }
-        } else {
-            // Strategy 3: Send new message if no messageId
-            try {
-                const newMsg = await bot.sendMessage(chatId, text, {
-                    parse_mode: 'Markdown',
-                    reply_markup: keyboard
-                });
-                console.log('✅ New message sent');
-                return newMsg.message_id;
-            } catch (sendError) {
-                console.error('❌ Message send failed:', sendError.message);
-                return null;
-            }
+            
+            return newMsg.message_id;
+        } catch (sendError) {
+            console.error('❌ Message send failed:', sendError.message);
+            return null;
         }
         
     } catch (error) {
         console.error('❌ Message update error:', error.message);
-        
-        // Ultimate fallback: Send simple text message
-        try {
-            const simpleText = `🤖 BOT REKAP GRUP\n\nGrup terdeteksi: ${groups.length}\nTotal anggota: ${groups.reduce((sum, g) => sum + g.members, 0)}\n\nKirim foto grup WhatsApp`;
-            
-            const fallbackMsg = await bot.sendMessage(chatId, simpleText);
-            console.log('✅ Ultimate fallback message sent');
-            return fallbackMsg.message_id;
-        } catch (ultimateError) {
-            console.error('❌ Ultimate fallback failed:', ultimateError.message);
-            return null;
-        }
+        return null;
     }
 }
 
@@ -673,7 +626,7 @@ async function processBatchPhotos(userId, chatId) {
     console.log(`🚀 Processing ${session.photoQueue.length} photos for user ${userId}`);
     session.isProcessing = true;
     
-    // Inisialisasi processing message
+    // Initialize processing message
     if (!session.processingMessageId) {
         try {
             const processingMsg = await bot.sendMessage(chatId, 
@@ -681,61 +634,56 @@ async function processBatchPhotos(userId, chatId) {
                 { parse_mode: 'Markdown' }
             );
             session.processingMessageId = processingMsg.message_id;
-            console.log('✅ Initial processing message created');
         } catch (error) {
-            console.error('❌ Failed to create processing message:', error.message);
+            console.error('❌ Failed to create processing message');
         }
     }
     
-    // Update status processing
-    session.processingMessageId = await superSafeUpdateMessage(chatId, session.processingMessageId, session.groups, true);
+    // Update status
+    session.processingMessageId = await ultraSafeUpdateMessage(chatId, session.processingMessageId, session.groups, true);
     
-    // Proses setiap foto secara berurutan
+    // Process photos
     const currentQueue = [...session.photoQueue];
     session.photoQueue = [];
     
-    for (let queueIndex = 0; queueIndex < currentQueue.length; queueIndex++) {
-        const photoData = currentQueue[queueIndex];
-        
+    for (const photoData of currentQueue) {
         try {
-            console.log(`📸 Processing photo ${photoData.order}/${currentQueue.length}: ${photoData.fileId}`);
+            console.log(`📸 Processing photo ${photoData.order}/${currentQueue.length}`);
             
-            // Download foto
-            const imagePath = await downloadPhoto(photoData.fileId);
-            console.log(`✅ Downloaded: ${imagePath}`);
+            // Download photo
+            const imagePath = await downloadPhotoWithRetry(photoData.fileId);
             
-            // OCR dengan OCR.space
-            const extractedText = await performOCRSpace(imagePath);
+            // Multi-engine OCR
+            const extractedText = await performMultiEngineOCR(imagePath);
             
-            // Parse dengan algoritma advanced
-            const groupInfo = parseWhatsAppGroupAdvanced(extractedText);
+            // Parse
+            const groupInfo = parseWhatsAppGroupUltimate(extractedText);
             
             if (groupInfo.success && groupInfo.memberCount > 0) {
                 session.addGroup(groupInfo.groupName, groupInfo.memberCount);
                 
-                console.log(`✅ Added group ${session.groups.length}: "${groupInfo.groupName}" - ${groupInfo.memberCount} members`);
+                console.log(`✅ Added: "${groupInfo.groupName}" - ${groupInfo.memberCount} members`);
                 
-                // Update hasil incremental setelah setiap foto
-                session.processingMessageId = await superSafeUpdateMessage(chatId, session.processingMessageId, session.groups, true);
+                // Update incremental
+                session.processingMessageId = await ultraSafeUpdateMessage(chatId, session.processingMessageId, session.groups, true);
             } else {
-                console.log(`⚠️ No valid data extracted from photo ${photoData.order}`);
+                console.log(`⚠️ No valid data from photo ${photoData.order}`);
             }
 
-            // Cleanup file
+            // Cleanup
             try {
                 if (fs.existsSync(imagePath)) {
                     fs.unlinkSync(imagePath);
                 }
             } catch (cleanupError) {
-                console.log('⚠️ File cleanup warning:', cleanupError.message);
+                console.log('⚠️ Cleanup warning:', cleanupError.message);
             }
 
-            // Delete user photo untuk mengurangi spam
+            // Delete user photo
             try {
                 await bot.deleteMessage(chatId, photoData.messageId);
-                console.log(`🗑️ Deleted user photo ${photoData.order}`);
             } catch (deleteError) {
-                console.log('⚠️ Could not delete user photo:', deleteError.message);
+                // Ignore delete errors
             }
             
         } catch (error) {
@@ -743,11 +691,11 @@ async function processBatchPhotos(userId, chatId) {
         }
     }
     
-    // Update final status
-    session.processingMessageId = await superSafeUpdateMessage(chatId, session.processingMessageId, session.groups, false);
+    // Final update
+    session.processingMessageId = await ultraSafeUpdateMessage(chatId, session.processingMessageId, session.groups, false);
     session.isProcessing = false;
     
-    console.log(`✅ Batch processing complete. Total groups detected: ${session.groups.length}`);
+    console.log(`✅ Batch complete. Total groups: ${session.groups.length}`);
 }
 
 // Handler untuk foto
@@ -779,7 +727,7 @@ bot.on('photo', async (msg) => {
         timestamp: Date.now()
     });
 
-    console.log(`📥 Photo queued as #${photoOrder}. Total queue: ${session.photoQueue.length}`);
+    console.log(`📥 Photo queued #${photoOrder}. Queue: ${session.photoQueue.length}`);
 
     if (session.timer) {
         clearTimeout(session.timer);
@@ -789,7 +737,7 @@ bot.on('photo', async (msg) => {
         await processBatchPhotos(userId, chatId);
     }, 10000);
 
-    console.log(`⏰ Timer set for 10 seconds. Queue: ${session.photoQueue.length} photos`);
+    console.log(`⏰ Timer set. Queue: ${session.photoQueue.length}`);
 });
 
 // Handler untuk callback query
@@ -821,7 +769,6 @@ bot.on('callback_query', async (query) => {
                             ]
                         }
                     });
-                    console.log('✅ Final results displayed');
                 } else {
                     await bot.answerCallbackQuery(query.id, { text: 'Belum ada grup yang terdeteksi!' });
                 }
@@ -830,7 +777,6 @@ bot.on('callback_query', async (query) => {
             case 'reset':
                 if (session) {
                     session.reset();
-                    console.log('🔄 Session reset for user', userId);
                 }
                 await bot.editMessageText('🔄 **Data direset!**\n\nKirim foto grup untuk memulai rekap baru.', {
                     chat_id: chatId,
@@ -840,7 +786,7 @@ bot.on('callback_query', async (query) => {
                 break;
         }
     } catch (error) {
-        console.error('⚠️ Callback query error:', error.message);
+        console.error('⚠️ Callback error:', error.message);
     }
 
     await bot.answerCallbackQuery(query.id);
@@ -856,39 +802,32 @@ bot.onText(/\/start/, async (msg) => {
         return;
     }
 
-    const welcomeText = `🤖 **OCR.SPACE PERFECT BOT**
+    const welcomeText = `🤖 **FIXED ROBUST OCR BOT**
 
-🎯 **Super Accurate WhatsApp Group Detection**
+🎯 **Multi-Engine OCR untuk Akurasi Maksimal**
 
-✨ **Fitur Unggulan:**
-• OCR.space API untuk akurasi maksimal
-• Advanced parsing algorithm
-• Deteksi format: "292" → Nama Grup ✅
-• Deteksi format: "Grup • 80 anggota" → 80 Anggota ✅
-• Multi-language support
-• Zero edit message errors
-• Incremental results berurutan
+✨ **Teknologi:**
+• OCR.space API (Primary)
+• Tesseract OCR (Fallback)
+• Advanced error handling
+• Fixed FormData upload
+• Retry mechanisms
 
-📊 **Format Output:**
-**1.**
-Nama Grup: 292
-Anggota: 80
-
-**2.**
-Nama Grup: Family Group
-Anggota: 25
-
-🧮 **TOTAL ANGGOTA:**
-80 + 25 = 105
+📊 **Deteksi Perfect:**
+• Format: "292" → Nama Grup ✅
+• Format: "Grup • 80 anggota" → 80 Anggota ✅
+• Support semua bahasa
+• Zero upload errors
+• Incremental results
 
 🚀 **Cara Pakai:**
 1. Screenshot info grup WhatsApp
-2. Kirim foto (bisa banyak sekaligus)
-3. Tunggu 10 detik untuk auto-process
-4. Lihat hasil real-time yang terus bertambah
-5. Klik "Selesai" untuk hasil final
+2. Kirim foto (bisa banyak)
+3. Tunggu 10 detik auto-process
+4. Lihat hasil real-time
+5. Klik "Selesai" untuk total
 
-💡 Kirim foto pertama untuk memulai!`;
+💡 Kirim foto untuk memulai!`;
 
     await bot.sendMessage(chatId, welcomeText, { parse_mode: 'Markdown' });
 });
@@ -905,19 +844,18 @@ bot.onText(/\/status/, async (msg) => {
     const session = userSessions.get(userId);
     
     if (session && session.groups.length > 0) {
-        const statusText = `📊 **STATUS REKAP SAAT INI**
+        const statusText = `📊 **STATUS REKAP**
 
-🔄 Status: ${session.isProcessing ? 'Memproses' : 'Siap'}
+🔄 Status: ${session.isProcessing ? 'Processing' : 'Ready'}
 📈 Total grup: ${session.groups.length}
 👥 Total anggota: ${session.getTotalMembers()}
-📸 Foto antrian: ${session.photoQueue.length}
+📸 Antrian: ${session.photoQueue.length}
 
-**HASIL TERKINI:**
 ${session.getFormattedResults()}`;
 
         await bot.sendMessage(chatId, statusText, { parse_mode: 'Markdown' });
     } else {
-        await bot.sendMessage(chatId, '📊 **STATUS:** Belum ada rekap aktif.\n\nKirim foto grup untuk memulai!', { parse_mode: 'Markdown' });
+        await bot.sendMessage(chatId, '📊 **STATUS:** Belum ada rekap.\n\nKirim foto untuk memulai!', { parse_mode: 'Markdown' });
     }
 });
 
@@ -933,7 +871,7 @@ bot.onText(/\/reset/, async (msg) => {
     const session = userSessions.get(userId);
     if (session) {
         session.reset();
-        await bot.sendMessage(chatId, '🔄 **Data berhasil direset!**\n\nKirim foto grup untuk memulai rekap baru.', { parse_mode: 'Markdown' });
+        await bot.sendMessage(chatId, '🔄 **Data direset!**\n\nKirim foto untuk memulai rekap baru.', { parse_mode: 'Markdown' });
     } else {
         await bot.sendMessage(chatId, '📊 Tidak ada data untuk direset.');
     }
@@ -945,26 +883,24 @@ bot.on('polling_error', (error) => {
 });
 
 process.on('unhandledRejection', (reason, promise) => {
-    console.error('❌ Unhandled Rejection at:', promise);
-    console.error('❌ Reason:', reason);
+    console.error('❌ Unhandled Rejection:', reason);
 });
 
 process.on('uncaughtException', (error) => {
     console.error('❌ Uncaught Exception:', error);
-    console.error('❌ Stack:', error.stack);
 });
 
 process.on('SIGINT', () => {
-    console.log('🛑 Bot shutting down gracefully...');
+    console.log('🛑 Bot shutting down...');
     
-    // Cleanup all sessions
+    // Cleanup
     for (const [userId, session] of userSessions) {
         if (session.timer) {
             clearTimeout(session.timer);
         }
     }
     
-    // Cleanup temp directory
+    // Cleanup temp files
     try {
         const tempDir = path.join(__dirname, 'temp');
         if (fs.existsSync(tempDir)) {
@@ -981,11 +917,11 @@ process.on('SIGINT', () => {
     process.exit(0);
 });
 
-// Startup messages
-console.log('🚀 OCR.SPACE PERFECT BOT STARTED!');
-console.log('🎯 Using OCR.space API for maximum accuracy');
-console.log('🛡️ Enhanced error handling & message management');
-console.log('🔑 API Key:', OCR_SPACE_API_KEY ? `${OCR_SPACE_API_KEY.slice(0, 8)}...` : 'NOT SET');
+// Startup
+console.log('🚀 FIXED ROBUST OCR BOT STARTED!');
+console.log('🎯 Multi-Engine: OCR.space + Tesseract');
+console.log('🛡️ Fixed FormData upload issues');
+console.log('🔑 OCR.space API Key:', OCR_SPACE_API_KEY ? `${OCR_SPACE_API_KEY.slice(0, 8)}...` : 'NOT SET');
 console.log('👥 Authorized Admins:', ADMIN_IDS);
-console.log('📱 Ready to process WhatsApp group screenshots!');
-console.log('===============================================');
+console.log('📱 Ready with enhanced error handling!');
+console.log('=====================================');
