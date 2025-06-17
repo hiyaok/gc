@@ -16,7 +16,7 @@ const userSessions = new Map();
 
 // Konfigurasi Tesseract untuk multi-bahasa
 const OCR_CONFIG = {
-    lang: 'eng+ind+ara+chi_sim+chi_tra+jpn+kor+tha+vie+rus+spa+fra+deu+ita+por+nld+swe+nor+dan+fin+pol+ces+hun+ron+bul+hrv+est+lav+lit+slk+slv+ukr+bel+mkd+alb+tur+heb+hin+ben+tam+tel+kan+mal+guj+pan+ori+asm+nep+sin+mya+khm+lao+mon+shn+kac+kar',
+    lang: 'eng+ind+ara+chi_sim+chi_tra+jpn+kor+tha+vie+rus+spa+fra+deu+ita+por+nld+swe+nor+dan+fin+pol+ces+hun+ron+bul+hrv+est+lav+lit+slk+slv+ukr+bel+mkd+tur+heb+hin+ben+tam+tel+kan+mal+guj+pan+ori+asm+nep+sin+mya',
     logger: m => {} // Disable logging untuk performa
 };
 
