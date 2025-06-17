@@ -9,13 +9,12 @@ const https = require('https');
 const BOT_TOKEN = '7782738957:AAE1hBtX3eIEop26IU07X_YSSaK-ki2RgNA';
 const ADMIN_IDS = [5988451717, 1285724437];
 
-// Tesseract configuration untuk akurasi optimal
+// Tesseract configuration yang optimal
 const TESSERACT_CONFIG = {
     lang: 'eng+ind+ara+chi_sim+jpn+kor+tha+vie+rus+spa+fra+deu',
     tessedit_pageseg_mode: Tesseract.PSM.AUTO,
     tessedit_ocr_engine_mode: Tesseract.OEM.LSTM_ONLY,
     preserve_interword_spaces: '1',
-    user_defined_dpi: '300',
     logger: () => {} // Silent mode
 };
 
@@ -87,7 +86,7 @@ class UserSession {
     }
 }
 
-// Fungsi OCR dengan Tesseract yang dioptimalkan
+// Fungsi OCR dengan Tesseract
 async function performTesseractOCR(imagePath) {
     try {
         console.log('🔍 Starting Tesseract OCR...');
@@ -108,190 +107,64 @@ async function performTesseractOCR(imagePath) {
     }
 }
 
-// Fungsi parsing yang sangat spesifik untuk posisi WhatsApp
-function parseWhatsAppByPosition(ocrText) {
-    console.log('\n🎯 Position-Based WhatsApp Parsing...');
+// Fungsi parsing yang SEDERHANA dan AKURAT
+function parseWhatsAppSimple(ocrText) {
+    console.log('\n🎯 Simple Accurate WhatsApp Parsing...');
     
-    // Clean dan split text berdasarkan line breaks
+    // Clean dan split text
     const lines = ocrText
         .split(/[\n\r]+/)
         .map(line => line.trim())
         .filter(line => line.length > 0);
     
-    console.log('📋 Detected Lines by Position:');
-    lines.forEach((line, i) => console.log(`  Position ${i}: "${line}"`));
+    console.log('📋 All Lines:');
+    lines.forEach((line, i) => console.log(`  ${i}: "${line}"`));
     
     let groupName = null;
     let memberCount = null;
     
-    // === STEP 1: DETEKSI NAMA GRUP (PRIORITAS POSISI ATAS) ===
-    console.log('\n🔍 STEP 1: Position-Based Group Name Detection...');
+    // === STEP 1: CARI JUMLAH ANGGOTA (LEBIH MUDAH DIDETEKSI) ===
+    console.log('\n🔍 STEP 1: Finding Member Count...');
     
-    // Keywords yang menandakan BUKAN nama grup
-    const excludeFromGroupName = [
-        // Indonesia
-        'grup', 'anggota', 'chat', 'audio', 'tambah', 'cari', 'notifikasi', 'visibilitas', 
-        'pesan', 'enkripsi', 'dibuat', 'terakhir', 'dilihat', 'online', 'ketik', 'info', 
-        'deskripsi', 'media', 'mati', 'semua', 'tersimpan',
-        
-        // English
-        'group', 'members', 'member', 'chat', 'audio', 'add', 'search', 'notification', 
-        'visibility', 'message', 'encryption', 'created', 'last', 'seen', 'online', 
-        'typing', 'info', 'description', 'media', 'mute', 'all', 'saved',
-        
-        // UI elements
-        'back', 'menu', 'settings', 'profile', 'contact', 'call', 'video', 'voice',
-        'camera', 'gallery', 'document', 'location', 'status', 'archive', 'pin'
-    ];
-    
-    // Cari nama grup di posisi-posisi atas
-    for (let i = 0; i < Math.min(lines.length, 6); i++) {
-        const line = lines[i];
-        
-        // Skip baris kosong
-        if (line.length === 0) continue;
-        
-        // Skip baris dengan exclude keywords
-        const hasExcludeKeyword = excludeFromGroupName.some(keyword => 
-            line.toLowerCase().includes(keyword.toLowerCase())
-        );
-        if (hasExcludeKeyword) {
-            console.log(`⏭️ Position ${i}: Skipped exclude keyword - "${line}"`);
-            continue;
-        }
-        
-        // Skip UI symbols
-        if (/[←→↓↑⬅➡⬇⬆📱💬🔍⚙️📞🎥🔊👥🔔⚡🗂️📋📄🔒]/.test(line)) {
-            console.log(`⏭️ Position ${i}: Skipped UI symbols - "${line}"`);
-            continue;
-        }
-        
-        // Skip phone numbers
-        if (/^\+?\d{8,15}$/.test(line.replace(/[\s\-()]/g, ''))) {
-            console.log(`⏭️ Position ${i}: Skipped phone number - "${line}"`);
-            continue;
-        }
-        
-        // Skip email addresses
-        if (/\S+@\S+\.\S+/.test(line)) {
-            console.log(`⏭️ Position ${i}: Skipped email - "${line}"`);
-            continue;
-        }
-        
-        // Skip dates and times
-        if (/\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}/.test(line) || /\d{1,2}:\d{2}/.test(line)) {
-            console.log(`⏭️ Position ${i}: Skipped date/time - "${line}"`);
-            continue;
-        }
-        
-        // Skip URLs
-        if (/https?:\/\/|www\.|\.com|\.org|\.net/.test(line)) {
-            console.log(`⏭️ Position ${i}: Skipped URL - "${line}"`);
-            continue;
-        }
-        
-        // Ini kandidat nama grup yang valid!
-        groupName = line.trim();
-        console.log(`✅ Position ${i}: Selected as GROUP NAME - "${groupName}"`);
-        break;
-    }
-    
-    // === STEP 2: DETEKSI JUMLAH ANGGOTA (PRIORITAS POSISI BAWAH NAMA GRUP) ===
-    console.log('\n🔍 STEP 2: Position-Based Member Count Detection...');
-    
-    // Pattern untuk deteksi anggota dengan semua bahasa
+    // Pattern untuk mendeteksi jumlah anggota
     const memberPatterns = [
-        // Indonesia - WhatsApp format: "Grup • 80 anggota"
-        /(?:grup|group)\s*[•·∙◦▪▫]\s*(\d+)\s*anggota/i,
-        
-        // Indonesia - Simple format: "80 anggota"
+        // Indonesia: "Grup • 80 anggota" atau "80 anggota"
         /(\d+)\s*anggota/i,
         
-        // English - WhatsApp format: "Group • 80 members"
-        /(?:grup|group)\s*[•·∙◦▪▫]\s*(\d+)\s*members?/i,
-        
-        // English - Simple format: "80 members"
+        // English: "Group • 80 members" atau "80 members"
         /(\d+)\s*members?/i,
         
-        // Format dengan bullet: "• 80 anggota/members"
-        /[•·∙◦▪▫]\s*(\d+)\s*(?:anggota|members?)/i,
+        // Dengan bullet: "• 80 anggota"
+        /•\s*(\d+)\s*(?:anggota|members?)/i,
         
-        // Format dengan separator: "anggota: 80" atau "members: 80"
-        /(?:anggota|members?)\s*[:\-•]?\s*(\d+)/i,
+        // Format grup: "Grup • 80"
+        /grup\s*[•·]\s*(\d+)/i,
+        /group\s*[•·]\s*(\d+)/i,
         
-        // Arabic patterns
-        /(?:مجموعة)\s*[•·∙◦▪▫]\s*(\d+)\s*(?:أعضاء)/i,
-        /(\d+)\s*(?:أعضاء)/i,
+        // Arabic
+        /(\d+)\s*أعضاء/i,
         
-        // Chinese patterns
-        /(?:群组|群組)\s*[•·∙◦▪▫]\s*(\d+)\s*(?:成员|成員)/i,
-        /(\d+)\s*(?:成员|成員)/i,
+        // Chinese
+        /(\d+)\s*成员/i,
+        /(\d+)\s*成員/i,
         
-        // Japanese patterns
-        /(?:グループ)\s*[•·∙◦▪▫]\s*(\d+)\s*(?:メンバー)/i,
-        /(\d+)\s*(?:メンバー)/i,
+        // Japanese
+        /(\d+)\s*メンバー/i,
         
-        // Korean patterns
-        /(?:그룹)\s*[•·∙◦▪▫]\s*(\d+)\s*(?:구성원)/i,
-        /(\d+)\s*(?:구성원)/i,
-        
-        // Thai patterns
-        /(?:กลุ่ม)\s*[•·∙◦▪▫]\s*(\d+)\s*(?:สมาชิก)/i,
-        /(\d+)\s*(?:สมาชิก)/i,
-        
-        // Vietnamese patterns
-        /(?:nhóm)\s*[•·∙◦▪▫]\s*(\d+)\s*(?:thành\s*viên)/i,
-        /(\d+)\s*(?:thành\s*viên)/i,
-        
-        // Russian patterns
-        /(?:группа)\s*[•·∙◦▪▫]\s*(\d+)\s*(?:участник)/i,
-        /(\d+)\s*(?:участник)/i,
-        
-        // Spanish patterns
-        /(?:grupo)\s*[•·∙◦▪▫]\s*(\d+)\s*(?:miembros?)/i,
-        /(\d+)\s*(?:miembros?)/i,
-        
-        // French patterns
-        /(?:groupe)\s*[•·∙◦▪▫]\s*(\d+)\s*(?:membres?)/i,
-        /(\d+)\s*(?:membres?)/i,
-        
-        // German patterns
-        /(?:gruppe)\s*[•·∙◦▪▫]\s*(\d+)\s*(?:mitglieder)/i,
-        /(\d+)\s*(?:mitglieder)/i,
-        
-        // Generic patterns dengan bullet
-        /[•·∙◦▪▫]\s*(\d+)/i
+        // Korean
+        /(\d+)\s*구성원/i
     ];
     
-    // Cari member count mulai dari posisi setelah nama grup ditemukan
-    let startPosition = 0;
-    if (groupName) {
-        // Cari posisi dimana nama grup ditemukan
-        for (let i = 0; i < lines.length; i++) {
-            if (lines[i].trim() === groupName.trim()) {
-                startPosition = i + 1; // Mulai cari dari posisi setelah nama grup
-                break;
-            }
-        }
-    }
-    
-    console.log(`🔍 Searching for member count starting from position ${startPosition}...`);
-    
-    // Cari pattern member count
-    for (let patternIndex = 0; patternIndex < memberPatterns.length; patternIndex++) {
-        const pattern = memberPatterns[patternIndex];
-        
-        // Cari mulai dari posisi setelah nama grup
-        for (let i = startPosition; i < lines.length; i++) {
-            const line = lines[i];
+    // Cari member count
+    for (const line of lines) {
+        for (let i = 0; i < memberPatterns.length; i++) {
+            const pattern = memberPatterns[i];
             const match = line.match(pattern);
             if (match) {
                 const count = parseInt(match[1]);
                 if (count >= 1 && count <= 1000000) {
                     memberCount = count;
-                    console.log(`✅ Position ${i}: Found MEMBER COUNT - ${count}`);
-                    console.log(`   From line: "${line}"`);
-                    console.log(`   Pattern: ${patternIndex + 1}`);
+                    console.log(`✅ Found member count: ${count} from line: "${line}"`);
                     break;
                 }
             }
@@ -299,70 +172,98 @@ function parseWhatsAppByPosition(ocrText) {
         if (memberCount !== null) break;
     }
     
+    // === STEP 2: CARI NAMA GRUP (BARIS PERTAMA YANG BUKAN INFO) ===
+    console.log('\n🔍 STEP 2: Finding Group Name...');
+    
+    // Keywords yang pasti BUKAN nama grup
+    const notGroupNameKeywords = [
+        'grup', 'group', 'anggota', 'members', 'member',
+        'chat', 'audio', 'tambah', 'add', 'cari', 'search',
+        'notifikasi', 'notification', 'info', 'description',
+        'deskripsi', 'media', 'visibilitas', 'visibility',
+        'pesan', 'message', 'enkripsi', 'encryption',
+        'online', 'last', 'seen', 'terakhir', 'dilihat'
+    ];
+    
+    // Cari nama grup - ambil baris pertama yang layak
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        
+        // Skip baris kosong
+        if (line.length === 0) continue;
+        
+        // Skip jika mengandung keyword yang bukan nama grup
+        const containsNotGroupName = notGroupNameKeywords.some(keyword => 
+            line.toLowerCase().includes(keyword.toLowerCase())
+        );
+        if (containsNotGroupName) {
+            console.log(`⏭️ Line ${i}: Skipped (contains keyword) - "${line}"`);
+            continue;
+        }
+        
+        // Skip jika mengandung member pattern (ini baris info anggota)
+        const containsMemberPattern = memberPatterns.some(pattern => pattern.test(line));
+        if (containsMemberPattern) {
+            console.log(`⏭️ Line ${i}: Skipped (member info) - "${line}"`);
+            continue;
+        }
+        
+        // Skip UI symbols
+        if (/[←→↓↑⬅➡⬇⬆📱💬🔍⚙️📞🎥🔊👥🔔]/.test(line)) {
+            console.log(`⏭️ Line ${i}: Skipped (UI symbols) - "${line}"`);
+            continue;
+        }
+        
+        // Skip phone numbers
+        if (/^\+?\d{8,15}$/.test(line.replace(/[\s\-()]/g, ''))) {
+            console.log(`⏭️ Line ${i}: Skipped (phone number) - "${line}"`);
+            continue;
+        }
+        
+        // Skip dates and times
+        if (/\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}/.test(line) || /\d{1,2}:\d{2}/.test(line)) {
+            console.log(`⏭️ Line ${i}: Skipped (date/time) - "${line}"`);
+            continue;
+        }
+        
+        // Skip URLs and emails
+        if (/https?:\/\/|www\.|\.com|@/.test(line)) {
+            console.log(`⏭️ Line ${i}: Skipped (URL/email) - "${line}"`);
+            continue;
+        }
+        
+        // Ini adalah kandidat nama grup yang baik!
+        groupName = line.trim();
+        console.log(`✅ Line ${i}: Selected as GROUP NAME - "${groupName}"`);
+        break;
+    }
+    
     // === FALLBACK SYSTEMS ===
     
     // Fallback untuk member count jika belum ketemu
     if (memberCount === null) {
-        console.log('\n🔄 Fallback: Advanced number search...');
-        const numberCandidates = [];
-        
-        // Cari semua angka yang masuk akal untuk jumlah anggota
-        for (let i = startPosition; i < lines.length; i++) {
-            const line = lines[i];
+        console.log('\n🔄 Fallback: Looking for any reasonable number...');
+        for (const line of lines) {
             const numbers = line.match(/\d+/g);
             if (numbers) {
-                numbers.forEach(numStr => {
+                for (const numStr of numbers) {
                     const num = parseInt(numStr);
-                    if (num >= 2 && num <= 100000) {
-                        let score = 0;
-                        
-                        // Score berdasarkan posisi (lebih dekat dengan nama grup = score tinggi)
-                        score += Math.max(0, 10 - (i - startPosition));
-                        
-                        // Score berdasarkan konteks
-                        if (/(?:grup|group|anggota|member)/i.test(line)) score += 20;
-                        if (/[•·∙◦▪▫]/.test(line)) score += 15;
-                        
-                        // Penalty untuk angka yang terlalu besar (kemungkinan ID)
-                        if (num > 10000) score -= 10;
-                        if (num < 5) score -= 5;
-                        
-                        numberCandidates.push({ 
-                            number: num, 
-                            line: line, 
-                            position: i,
-                            score: score 
-                        });
-                        
-                        console.log(`   Position ${i}: Number ${num} (score: ${score}) in "${line}"`);
+                    if (num >= 2 && num <= 10000) { // Range wajar untuk grup
+                        memberCount = num;
+                        console.log(`🔄 Fallback member count: ${num} from "${line}"`);
+                        break;
                     }
-                });
+                }
             }
-        }
-        
-        if (numberCandidates.length > 0) {
-            // Sort berdasarkan score tertinggi
-            numberCandidates.sort((a, b) => b.score - a.score);
-            memberCount = numberCandidates[0].number;
-            console.log(`🔄 Fallback member count: ${memberCount} (score: ${numberCandidates[0].score}, position: ${numberCandidates[0].position})`);
+            if (memberCount !== null) break;
         }
     }
     
     // Fallback untuk group name jika belum ketemu
     if (!groupName && lines.length > 0) {
-        console.log('\n🔄 Fallback: Using first substantial line as group name...');
-        for (let i = 0; i < Math.min(lines.length, 3); i++) {
-            const line = lines[i];
-            if (line.trim().length >= 1) {
-                // Pastikan bukan line yang mengandung member info
-                const containsMemberInfo = memberPatterns.some(pattern => pattern.test(line));
-                if (!containsMemberInfo) {
-                    groupName = line.trim();
-                    console.log(`🔄 Fallback group name: "${groupName}" from position ${i}`);
-                    break;
-                }
-            }
-        }
+        console.log('\n🔄 Fallback: Using first line as group name...');
+        groupName = lines[0].trim();
+        console.log(`🔄 Fallback group name: "${groupName}"`);
     }
     
     const result = {
@@ -371,11 +272,11 @@ function parseWhatsAppByPosition(ocrText) {
         success: groupName !== null && memberCount !== null
     };
     
-    console.log('\n🎯 === POSITION-BASED FINAL RESULT ===');
+    console.log('\n🎯 === SIMPLE PARSING RESULT ===');
     console.log(`   Group Name: "${result.groupName}"`);
     console.log(`   Member Count: ${result.memberCount}`);
     console.log(`   Success: ${result.success}`);
-    console.log('====================================\n');
+    console.log('==============================\n');
     
     return result;
 }
@@ -440,9 +341,9 @@ async function updateMessageWithProgress(chatId, messageId, groups, isProcessing
     try {
         let text = `🤖 **BOT REKAP GRUP - TESSERACT OCR**\n\n`;
         
-        if (isProcessing) {
+        if (isProcessing && currentPhoto > 0) {
             text += `⏳ **Memproses foto ${currentPhoto}/${totalPhotos}...**\n\n`;
-        } else if (totalPhotos > 0) {
+        } else if (!isProcessing && totalPhotos > 0) {
             text += `✅ **Selesai memproses ${totalPhotos} foto**\n\n`;
         } else {
             text += `✅ **Siap menerima foto berikutnya**\n\n`;
@@ -469,7 +370,6 @@ async function updateMessageWithProgress(chatId, messageId, groups, isProcessing
         
         // Check for content changes
         if (session && session.lastMessageContent === text) {
-            console.log('⏭️ Skipping update - content unchanged');
             return messageId;
         }
         
@@ -488,27 +388,25 @@ async function updateMessageWithProgress(chatId, messageId, groups, isProcessing
                     parse_mode: 'Markdown',
                     reply_markup: keyboard
                 });
-                console.log('✅ Message updated successfully');
                 return messageId;
             } catch (editError) {
-                console.log('⚠️ Edit failed, sending new message');
+                // If edit fails, send new message
             }
         }
         
-        // Send new message if edit fails
+        // Send new message
         try {
             const newMsg = await bot.sendMessage(chatId, text, {
                 parse_mode: 'Markdown',
                 reply_markup: keyboard
             });
-            console.log('✅ New message sent');
             
             // Try to delete old message
             if (messageId) {
                 try {
                     await bot.deleteMessage(chatId, messageId);
                 } catch (deleteError) {
-                    console.log('⚠️ Could not delete old message');
+                    // Ignore delete errors
                 }
             }
             
@@ -555,7 +453,8 @@ async function processBatchPhotos(userId, chatId) {
         const currentPhotoNumber = photoIndex + 1;
         
         try {
-            console.log(`📸 Processing photo ${currentPhotoNumber}/${totalPhotos}: ${photoData.fileId}`);
+            console.log(`\n📸 === PROCESSING PHOTO ${currentPhotoNumber}/${totalPhotos} ===`);
+            console.log(`Photo ID: ${photoData.fileId}`);
             
             // Update progress
             session.processingMessageId = await updateMessageWithProgress(
@@ -574,13 +473,13 @@ async function processBatchPhotos(userId, chatId) {
             // Perform OCR
             const extractedText = await performTesseractOCR(imagePath);
             
-            // Parse dengan fokus posisi
-            const groupInfo = parseWhatsAppByPosition(extractedText);
+            // Parse dengan algoritma sederhana
+            const groupInfo = parseWhatsAppSimple(extractedText);
             
             if (groupInfo.success && groupInfo.memberCount > 0) {
                 session.addGroup(groupInfo.groupName, groupInfo.memberCount);
                 
-                console.log(`✅ Photo ${currentPhotoNumber}: Added "${groupInfo.groupName}" - ${groupInfo.memberCount} members`);
+                console.log(`✅ Photo ${currentPhotoNumber}: Successfully added "${groupInfo.groupName}" - ${groupInfo.memberCount} members`);
                 
                 // Update hasil incremental
                 session.processingMessageId = await updateMessageWithProgress(
@@ -628,7 +527,9 @@ async function processBatchPhotos(userId, chatId) {
     );
     session.isProcessing = false;
     
-    console.log(`✅ Batch processing complete. Total groups detected: ${session.groups.length}`);
+    console.log(`\n✅ === BATCH PROCESSING COMPLETE ===`);
+    console.log(`Total groups detected: ${session.groups.length}`);
+    console.log(`Total members: ${session.getTotalMembers()}`);
 }
 
 // Handler untuk foto
@@ -735,20 +636,20 @@ bot.onText(/\/start/, async (msg) => {
         return;
     }
 
-    const welcomeText = `🤖 **TESSERACT POSITION-ACCURATE BOT**
+    const welcomeText = `🤖 **SIMPLE ACCURATE TESSERACT BOT**
 
-🎯 **Deteksi Berdasarkan Posisi WhatsApp**
+🎯 **Algoritma Sederhana dan Akurat**
 
-✨ **Keunggulan:**
+✨ **Cara Kerja:**
 • Tesseract OCR yang stabil
-• Fokus pada posisi elemen WhatsApp
-• Nama grup selalu dicari di ATAS
-• Jumlah anggota dicari di BAWAH nama grup
-• Progress yang jelas (foto X/Y)
+• Parsing sederhana tapi tepat sasaran
+• Nama grup = baris pertama yang bukan info
+• Jumlah anggota = extract dari "X anggota"
+• Progress jelas (foto X/Y)
 
 📊 **Contoh untuk Screenshot Anda:**
-Position 0: "292" → Nama Grup ✅
-Position 1: "Grup • 80 anggota" → 80 Anggota ✅
+"292" → Nama Grup ✅
+"Grup • 80 anggota" → 80 Anggota ✅
 
 📋 **Format Output:**
 **1.**
@@ -759,7 +660,7 @@ Anggota: 80
 1. Screenshot info grup WhatsApp
 2. Kirim foto (bisa banyak sekaligus)
 3. Tunggu 10 detik untuk auto-process
-4. Lihat progress real-time (foto X/Y)
+4. Lihat progress (foto X/Y)
 5. Klik "Selesai" untuk total
 
 💡 Kirim foto untuk memulai!`;
@@ -854,10 +755,10 @@ process.on('SIGINT', () => {
 });
 
 // Startup messages
-console.log('🚀 TESSERACT POSITION-ACCURATE BOT STARTED!');
-console.log('🎯 Focus: Position-based WhatsApp detection');
-console.log('📍 Algorithm: Top=GroupName, Below=MemberCount');
+console.log('🚀 SIMPLE ACCURATE TESSERACT BOT STARTED!');
+console.log('🎯 Algorithm: Simple but accurate parsing');
+console.log('📍 Focus: Group name = first valid line, Members = extract numbers');
 console.log('🔤 Languages:', TESSERACT_CONFIG.lang);
 console.log('👥 Authorized Admins:', ADMIN_IDS);
-console.log('📱 Ready for WhatsApp group screenshots!');
-console.log('===========================================');
+console.log('📱 Ready for accurate WhatsApp group detection!');
+console.log('================================================');
