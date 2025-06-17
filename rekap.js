@@ -390,7 +390,7 @@ async function updateProcessingMessage(chatId, messageId, groups, isProcessing =
         groups.map((g, i) => `${i + 1}. ${g.name} - ${g.members} anggota`).join('\n') : 
         'Belum ada grup yang terdeteksi';
     
-    const text = `🤖 **Bot Rekap Grup**\n\n${statusText}\n\n📊 **Hasil Sementara:**\n${groupsList}\n\n💡 Kirim foto grup lainnya atau klik Selesai untuk melihat total`;
+    const text = `🤖 **Bot Rekap Grup**\n\n${statusText}\n\n📊 **Hasil Sementara:**\n Nama : ${groupsList}\n\n💡 Kirim foto grup lainnya atau klik Selesai untuk melihat total`;
     
     try {
         await bot.editMessageText(text, {
